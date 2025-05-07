@@ -298,7 +298,7 @@ export const getMemberStats = async (memberId) => {
     const response = await api.get(`/api/members/${memberId}/statistics`, { headers });
     console.log('Statistics response:', response.data);
     
-    // The server returns the stats directly
+    // The server returns the stats directly with camelCase property names
     if (response.data && response.data.stats) {
       return { stats: response.data.stats };
     } else if (response.data && response.data.member && response.data.stats) {
@@ -306,15 +306,30 @@ export const getMemberStats = async (memberId) => {
       return { stats: response.data.stats };
     } else if (response.data) {
       // Handle case where stats might be at the top level
-      return { stats: response.data };
+      // Convert the response to a stats object with consistent property names
+      return { 
+        stats: {
+          totalLoans: response.data.totalLoans || 0,
+          activeLoans: response.data.activeLoans || 0,
+          overdueLoans: response.data.overdueLoans || 0,
+          returnedLoans: response.data.returnedLoans || 
+                         (response.data.totalLoans - response.data.activeLoans) || 0,
+          totalFines: response.data.totalFines || 0,
+          unpaidFines: response.data.unpaidFines || 0,
+          memberSince: response.data.memberSince || null
+        }
+      };
     } else {
       // Return default stats structure if no data
       return { 
         stats: {
-          total_loans: 0,
-          active_loans: 0,
-          returned_loans: 0,
-          overdue_loans: 0
+          totalLoans: 0,
+          activeLoans: 0,
+          returnedLoans: 0,
+          overdueLoans: 0,
+          totalFines: 0,
+          unpaidFines: 0,
+          memberSince: null
         }
       };
     }
@@ -331,10 +346,13 @@ export const getMemberStats = async (memberId) => {
     // Return default stats on error instead of throwing
     return { 
       stats: {
-        total_loans: 0,
-        active_loans: 0,
-        returned_loans: 0,
-        overdue_loans: 0
+        totalLoans: 0,
+        activeLoans: 0,
+        returnedLoans: 0,
+        overdueLoans: 0,
+        totalFines: 0,
+        unpaidFines: 0,
+        memberSince: null
       }
     };
   }

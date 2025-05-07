@@ -28,7 +28,9 @@ router.use(authenticate);
 
 // Member-specific operations with ID parameter
 // These routes can be accessed by the authenticated member or by staff
-router.get('/:id/statistics', validateIdParam('id'), memberController.getMemberStats);
+router.get('/:id/statistics', validateIdParam('id'), memberController.getMemberStatistics);
+router.get('/:id/stats', validateIdParam('id'), memberController.getMemberStatistics); // Alias for backward compatibility
+router.get('/:id/stats-debug', validateIdParam('id'), memberController.getMemberStatsDebug); // Debug route for troubleshooting
 router.get('/:id/loans', validateIdParam('id'), memberController.getMemberLoans);
 router.get('/:id', validateIdParam('id'), memberController.getMemberById);
 

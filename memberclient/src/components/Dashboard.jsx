@@ -37,10 +37,10 @@ const Dashboard = () => {
   const { member, logout } = useAuth();
   const { serverHost, serverPort } = useServer();
   const [stats, setStats] = useState({
-    total_loans: 0,
-    active_loans: 0,
-    returned_loans: 0,
-    overdue_loans: 0
+    totalLoans: 0,
+    activeLoans: 0,
+    overdueLoans: 0,
+    returnedLoans: 0
   });
   const [loans, setLoans] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -277,7 +277,7 @@ const Dashboard = () => {
                     <Grid item xs={6} sm={3}>
                       <Box sx={{ textAlign: 'center', p: 1 }}>
                         <Typography variant="h4" color="primary">
-                          {stats?.total_loans || 0}
+                          {stats?.totalLoans || 0}
                         </Typography>
                         <Typography variant="body2" color="text.secondary">
                           Total Loans
@@ -287,7 +287,7 @@ const Dashboard = () => {
                     <Grid item xs={6} sm={3}>
                       <Box sx={{ textAlign: 'center', p: 1 }}>
                         <Typography variant="h4" color="info.main">
-                          {stats?.active_loans || 0}
+                          {stats?.activeLoans || 0}
                         </Typography>
                         <Typography variant="body2" color="text.secondary">
                           Active Loans
@@ -297,7 +297,7 @@ const Dashboard = () => {
                     <Grid item xs={6} sm={3}>
                       <Box sx={{ textAlign: 'center', p: 1 }}>
                         <Typography variant="h4" color="success.main">
-                          {stats?.returned_loans || 0}
+                          {stats?.returnedLoans || stats?.totalLoans - stats?.activeLoans || 0}
                         </Typography>
                         <Typography variant="body2" color="text.secondary">
                           Returned Books
@@ -307,7 +307,7 @@ const Dashboard = () => {
                     <Grid item xs={6} sm={3}>
                       <Box sx={{ textAlign: 'center', p: 1 }}>
                         <Typography variant="h4" color="error.main">
-                          {stats?.overdue_loans || 0}
+                          {stats?.overdueLoans || 0}
                         </Typography>
                         <Typography variant="body2" color="text.secondary">
                           Overdue Items
@@ -321,7 +321,7 @@ const Dashboard = () => {
                       color="primary"
                       startIcon={<MenuBookIcon />}
                       onClick={() => setOpenReturnDialog(true)}
-                      disabled={stats?.active_loans === 0}
+                      disabled={stats?.activeLoans === 0}
                       sx={{ px: 3, py: 1 }}
                     >
                       Return Books

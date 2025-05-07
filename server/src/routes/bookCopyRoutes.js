@@ -20,8 +20,8 @@ const router = express.Router();
 
 // Public routes
 router.get('/', bookCopyController.getAllBookCopies);
-router.get('/book/:bookId/availability', validateIdParam('bookId'), bookCopyController.getBookAvailability);
 router.get('/book/:bookId', validateIdParam('bookId'), bookCopyController.getBookCopiesByBookId);
+router.get('/book/:bookId/availability', validateIdParam('bookId'), bookCopyController.getBookAvailability);
 router.get('/:id', validateIdParam('id'), bookCopyController.getBookCopyById);
 
 // Protected routes - require authentication
