@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' http://localhost:3000 ws://localhost:3000 http://localhost:3001; worker-src 'self' blob:;"
+    />
+    <title>Hiraya Balanghay - Library Management System</title>
+    <script>
+      // Track CSS loading status
+      let cssLoaded = false;
+      
+      // Handle CSS loading
+      function handleCSSLoading() {
+        // Create a link element to load the CSS
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = 'index.css';
+        link.onload = function() {
+          console.log('CSS loaded successfully');
+          cssLoaded = true;
+        };
+        link.onerror = function(e) {
+          console.error('Error loading CSS:', e);
+          // CSS will be handled by our fallback in App.jsx
+        };
+        document.head.appendChild(link);
+      }
+      
+      // Execute when DOM is ready
+      document.addEventListener('DOMContentLoaded', function() {
+        handleCSSLoading();
+      });
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // Global error handler
+      window.addEventListener("error", function (event) {
+        console.error("Script error:", event.error);
+        // If the error is related to a resource, log it specifically
+        if (event.target && event.target.tagName) {
+          const tagName = event.target.tagName.toLowerCase();
+          if (tagName === 'link') {
+            console.error("CSS loading error:", event);
+          } else if (tagName === 'img') {
+            console.error("Image loading error:", event);
+          } else if (tagName === 'script') {
+            console.error("Script loading error:", event);
+          }
+        }
+      });
+    </script>
+    <script src="bundle.js"></script>
+  </body>
+</html>
