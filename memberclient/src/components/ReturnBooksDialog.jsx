@@ -41,7 +41,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { returnBooks, getMemberLoans } from '../services/apiService';
 
-const ReturnBooksDialog = ({ open, onClose, onSuccess, preselectedLoan }) => {
+const ReturnBooksDialog = ({ open, onClose, onSuccess, preselectedLoan, preloadedLoanIds = [] }) => {
   const { member } = useAuth();
   const [activeTab, setActiveTab] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -49,7 +49,7 @@ const ReturnBooksDialog = ({ open, onClose, onSuccess, preselectedLoan }) => {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
   const [loans, setLoans] = useState([]);
-  const [selectedLoans, setSelectedLoans] = useState([]);
+  const [selectedLoans, setSelectedLoans] = useState({});
   const [qrInput, setQrInput] = useState('');
   
   // Fetch member loans when dialog opens
@@ -66,12 +66,15 @@ const ReturnBooksDialog = ({ open, onClose, onSuccess, preselectedLoan }) => {
       const matchingLoan = loans.find(loan => loan.id === preselectedLoan.id);
       if (matchingLoan) {
         // If the loan is not already selected, add it to selectedLoans
-        if (!selectedLoans.some(loan => loan.id === matchingLoan.id)) {
-          setSelectedLoans([{
-            ...matchingLoan,
-            returnCondition: 'Good',
-            note: ''
-          }]);
+        if (!selectedLoans[matchingLoan.id]) {
+          setSelectedLoans({
+            ...selectedLoans,
+            [matchingLoan.id]: {
+              loanId: matchingLoan.id,
+              returnCondition: 'Good',
+              note: ''
+            }
+          });
         }
       }
     }
@@ -80,13 +83,70 @@ const ReturnBooksDialog = ({ open, onClose, onSuccess, preselectedLoan }) => {
   // Reset state when dialog closes
   useEffect(() => {
     if (!open) {
-      setSelectedLoans([]);
+      setSelectedLoans({});
       setError(null);
       setSuccess(null);
       setQrInput('');
       setActiveTab(0);
     }
   }, [open]);
+  
+  // Add this useEffect to handle preloaded loan IDs
+  useEffect(() => {
+    // Create a flag to track if we've already processed the preloaded IDs
+    const shouldProcessPreloadedIds = open && 
+      preloadedLoanIds.length > 0 && 
+      Object.keys(selectedLoans).length === 0 && 
+      member?.id && 
+      loans.length > 0;
+    
+    // Log every time the effect is triggered
+    console.log('ReturnBooksDialog preloadedLoanIds effect triggered:', { 
+      open, 
+      preloadedLoanIds: preloadedLoanIds.length > 0 ? `${preloadedLoanIds.length} IDs` : 'none',
+      memberPresent: !!member?.id,
+      loansLoaded: loans.length,
+      shouldProcess: shouldProcessPreloadedIds,
+      alreadySelected: Object.keys(selectedLoans).length > 0
+    });
+    
+    if (shouldProcessPreloadedIds) {
+      // Only process preloaded loan IDs if:
+      // 1. Dialog is open
+      // 2. We have preloaded IDs
+      // 3. No loans are already selected (to prevent double processing)
+      // 4. Member is logged in
+      // 5. Loans are loaded
+      console.log('Processing preloaded loan IDs:', preloadedLoanIds);
+      
+      const newSelectedLoans = {};
+      
+      console.log('Matching preloaded IDs against loaded loans:', {
+        preloadedIds: preloadedLoanIds,
+        availableLoans: loans.map(loan => ({ id: loan.id, status: loan.status, returned: !!loan.return_date }))
+      });
+      
+      // Match preloaded loan IDs with actual loans
+      loans.forEach(loan => {
+        if (preloadedLoanIds.includes(loan.id) && !loan.return_date) {
+          console.log('Found matching active loan for preloaded ID:', loan.id);
+          newSelectedLoans[loan.id] = {
+            loanId: loan.id,
+            returnCondition: 'Good',
+            note: 'Returned via QR code scan'
+          };
+        }
+      });
+      
+      if (Object.keys(newSelectedLoans).length > 0) {
+        console.log('Setting selected loans:', newSelectedLoans);
+        setSelectedLoans(newSelectedLoans);
+      } else {
+        console.warn('No active loans matched the preloaded IDs!');
+        setError('No active loans found matching the QR code data. They may have already been returned.');
+      }
+    }
+  }, [open, preloadedLoanIds, member?.id, loans]);
   
   const fetchMemberLoans = async () => {
     if (!member || !member.id) return;
@@ -128,46 +188,59 @@ const ReturnBooksDialog = ({ open, onClose, onSuccess, preselectedLoan }) => {
   };
   
   const handleToggleLoan = (loan) => {
+    if (!loan || !loan.id) return;
+    
+    // Skip already returned books
+    if (loan.return_date || loan.status === 'Returned') {
+      console.log('Cannot select already returned book:', loan.id);
+      return;
+    }
+    
     setSelectedLoans(prev => {
       // Check if this loan is already selected
-      const isSelected = prev.some(selectedLoan => selectedLoan.id === loan.id);
+      const isSelected = Boolean(prev[loan.id]);
       
       if (isSelected) {
         // Remove from selected
-        return prev.filter(selectedLoan => selectedLoan.id !== loan.id);
+        const newSelectedLoans = { ...prev };
+        delete newSelectedLoans[loan.id];
+        return newSelectedLoans;
       } else {
         // Add to selected with default values
-        return [...prev, {
-          ...loan,
-          returnCondition: 'Good',
-          note: ''
-        }];
+        return {
+          ...prev,
+          [loan.id]: {
+            loanId: loan.id,
+            returnCondition: 'Good',
+            note: ''
+          }
+        };
       }
     });
   };
   
   const handleConditionChange = (loanId, condition) => {
-    setSelectedLoans(prev => 
-      prev.map(loan => 
-        loan.id === loanId 
-          ? { ...loan, returnCondition: condition } 
-          : loan
-      )
-    );
+    setSelectedLoans(prev => ({
+      ...prev,
+      [loanId]: {
+        ...prev[loanId],
+        returnCondition: condition
+      }
+    }));
   };
   
   const handleNoteChange = (loanId, note) => {
-    setSelectedLoans(prev => 
-      prev.map(loan => 
-        loan.id === loanId 
-          ? { ...loan, note } 
-          : loan
-      )
-    );
+    setSelectedLoans(prev => ({
+      ...prev,
+      [loanId]: {
+        ...prev[loanId],
+        note: note
+      }
+    }));
   };
   
   const handleReturnBooks = async () => {
-    if (selectedLoans.length === 0) {
+    if (Object.keys(selectedLoans).length === 0) {
       setError('Please select at least one book to return.');
       return;
     }
@@ -178,46 +251,49 @@ const ReturnBooksDialog = ({ open, onClose, onSuccess, preselectedLoan }) => {
     
     try {
       // Make sure we have valid loan IDs
-      if (!selectedLoans.some(loan => loan.id)) {
+      if (!Object.values(selectedLoans).some(loan => loan.loanId)) {
         console.error('Invalid loan data: No valid loan IDs found', selectedLoans);
         setError('Cannot return books: Missing loan IDs');
+        setReturning(false);
         return;
       }
       
-      // Log selected loans for debugging
-      console.log('Selected loans for return:', selectedLoans);
-      
-      // Format data for the API - using loanId instead of loan_id to match server expectations
+      // Format data for the API
       const returnData = {
-        returns: selectedLoans.map(loan => ({
-          loanId: Number(loan.id),
+        returns: Object.values(selectedLoans).map(loan => ({
+          loanId: Number(loan.loanId),
           returnCondition: loan.returnCondition || 'Good',
           note: loan.note || ''
         }))
       };
       
-      console.log('Returning books:', returnData);
+      console.log('Return data:', returnData);
+      
+      // Call the API to process returns
       const result = await returnBooks(returnData);
       
-      console.log('Return result:', result);
-      
       if (result.success) {
-        setSuccess(`Successfully returned ${selectedLoans.length} book(s).`);
-        setSelectedLoans([]);
+        setSuccess(`Successfully returned ${Object.keys(selectedLoans).length} book(s).`);
+        setSelectedLoans({});
         
         // Refresh loans list
-        fetchMemberLoans();
+        await fetchMemberLoans();
         
-        // Call success callback
+        // Notify parent component of success
         if (onSuccess) {
           onSuccess(result);
         }
+        
+        // Close dialog after successful return
+        setTimeout(() => {
+          onClose();
+        }, 1500);
       } else {
         setError(result.message || 'Failed to return books. Please try again.');
       }
-    } catch (err) {
-      console.error('Error returning books:', err);
-      setError(`Error: ${err.message || 'Failed to return books'}`);
+    } catch (error) {
+      console.error('Error returning books:', error);
+      setError('An error occurred while returning books. Please try again.');
     } finally {
       setReturning(false);
     }
@@ -225,66 +301,98 @@ const ReturnBooksDialog = ({ open, onClose, onSuccess, preselectedLoan }) => {
   
   const handleProcessQR = async () => {
     if (!qrInput.trim()) {
-      setError('Please enter QR code data.');
+      setError('Please enter a QR code or loan ID');
       return;
     }
     
-    setReturning(true);
+    setLoading(true);
     setError(null);
     setSuccess(null);
     
     try {
-      // Parse QR data
-      let qrData;
-      try {
-        qrData = JSON.parse(qrInput);
-      } catch (err) {
-        // If it's not valid JSON, try using it as a raw loan ID
-        if (/^\d+$/.test(qrInput.trim())) {
-          qrData = { loansIds: [parseInt(qrInput.trim(), 10)] };
-        } else {
-          throw new Error('Invalid QR code format. Please scan a valid library receipt QR code.');
+      let processedInput = qrInput.trim();
+      let loanIds = [];
+      
+      // Check if input is a valid JSON
+      if (processedInput.startsWith('{') || processedInput.startsWith('[')) {
+        try {
+          const jsonData = JSON.parse(processedInput);
+          
+          // Check for different JSON structures
+          if (jsonData.l && Array.isArray(jsonData.l)) {
+            // Format { l: [id1, id2] }
+            loanIds = jsonData.l.map(id => Number(id));
+          } else if (jsonData.loan_ids && Array.isArray(jsonData.loan_ids)) {
+            // Format { loan_ids: [id1, id2] }
+            loanIds = jsonData.loan_ids.map(id => Number(id));
+          } else if (jsonData.loansIds && Array.isArray(jsonData.loansIds)) {
+            // Format { loansIds: [id1, id2] }
+            loanIds = jsonData.loansIds.map(id => Number(id));
+          } else if (jsonData.id) {
+            // Single loan ID
+            loanIds = [Number(jsonData.id)];
+          } else if (jsonData.loanId) {
+            // Single loan ID
+            loanIds = [Number(jsonData.loanId)];
+          }
+        } catch (e) {
+          console.error('Error parsing QR JSON:', e);
+          // Not valid JSON, continue with text processing
         }
       }
       
-      console.log('Processed QR data:', qrData);
-      
-      // Check if it has loan IDs
-      if (!qrData.loansIds || !Array.isArray(qrData.loansIds) || qrData.loansIds.length === 0) {
-        throw new Error('No loan IDs found in QR code.');
+      // If not parsed as JSON, try as comma-separated list or single number
+      if (loanIds.length === 0) {
+        if (processedInput.includes(',')) {
+          // Comma-separated list
+          loanIds = processedInput.split(',')
+            .map(id => id.trim())
+            .filter(id => /^\d+$/.test(id))
+            .map(id => Number(id));
+        } else if (/^\d+$/.test(processedInput)) {
+          // Single number
+          loanIds = [Number(processedInput)];
+        }
       }
       
-      // Format data for return, using loanId instead of loan_id
-      const returnData = {
-        returns: qrData.loansIds.map(loanId => ({
-          loanId: Number(loanId),
+      if (loanIds.length === 0) {
+        throw new Error('Could not find any valid loan IDs in the QR code');
+      }
+      
+      console.log('Extracted loan IDs:', loanIds);
+      
+      // Match loan IDs with actual loans and select them
+      const matchedLoans = loans.filter(loan => 
+        loanIds.includes(loan.id) && 
+        !loan.return_date && 
+        loan.status !== 'Returned'
+      );
+      
+      if (matchedLoans.length === 0) {
+        throw new Error('No active loans found matching the QR code data');
+      }
+      
+      console.log('Matched loans:', matchedLoans);
+      
+      // Select the matched loans
+      const newSelectedLoans = {};
+      
+      matchedLoans.forEach(loan => {
+        newSelectedLoans[loan.id] = {
+          loanId: loan.id,
           returnCondition: 'Good',
-          note: 'Returned via QR code scan'
-        }))
-      };
+          note: 'Returned via QR code'
+        };
+      });
       
-      console.log('QR return data:', returnData);
-      const result = await returnBooks(returnData);
-      
-      if (result.success) {
-        setSuccess(`Successfully returned ${qrData.loansIds.length} book(s).`);
-        setQrInput('');
-        
-        // Refresh loans list
-        fetchMemberLoans();
-        
-        // Call success callback
-        if (onSuccess) {
-          onSuccess(result);
-        }
-      } else {
-        setError(result.message || 'Failed to return books. Please try again.');
-      }
-    } catch (err) {
-      console.error('Error processing QR code:', err);
-      setError(`Error: ${err.message || 'Failed to process QR code'}`);
+      setSelectedLoans(newSelectedLoans);
+      setSuccess(`Found ${matchedLoans.length} loan(s) to return`);
+      setActiveTab(0); // Switch to manual tab to show the selected loans
+    } catch (error) {
+      console.error('Error processing QR code:', error);
+      setError(error.message || 'Failed to process QR code');
     } finally {
-      setReturning(false);
+      setLoading(false);
     }
   };
   
@@ -344,7 +452,7 @@ const ReturnBooksDialog = ({ open, onClose, onSuccess, preselectedLoan }) => {
             sx={{ 
               mb: 2, 
               p: 2,
-              border: selectedLoans.some(l => l.id === loan.id) ? '2px solid #1976d2' : 'none',
+              border: selectedLoans[loan.id] ? '2px solid #1976d2' : 'none',
               cursor: 'pointer'
             }}
             onClick={() => handleToggleLoan(loan)}
@@ -355,7 +463,7 @@ const ReturnBooksDialog = ({ open, onClose, onSuccess, preselectedLoan }) => {
                   <FormControlLabel
                     control={
                       <Checkbox 
-                        checked={selectedLoans.some(l => l.id === loan.id)} 
+                        checked={selectedLoans[loan.id]} 
                         onChange={() => handleToggleLoan(loan)}
                         onClick={(e) => e.stopPropagation()}
                       />
@@ -382,12 +490,12 @@ const ReturnBooksDialog = ({ open, onClose, onSuccess, preselectedLoan }) => {
                 </Box>
               </Grid>
               
-              {selectedLoans.some(l => l.id === loan.id) && (
+              {selectedLoans[loan.id] && (
                 <Grid item xs={12} md={5}>
                   <FormControl fullWidth size="small" sx={{ mb: 2 }}>
                     <InputLabel>Condition</InputLabel>
                     <Select
-                      value={selectedLoans.find(l => l.id === loan.id)?.returnCondition || 'Good'}
+                      value={selectedLoans[loan.id]?.returnCondition || 'Good'}
                       onChange={(e) => handleConditionChange(loan.id, e.target.value)}
                       label="Condition"
                       onClick={(e) => e.stopPropagation()}
@@ -402,7 +510,7 @@ const ReturnBooksDialog = ({ open, onClose, onSuccess, preselectedLoan }) => {
                     fullWidth
                     size="small"
                     label="Notes (optional)"
-                    value={selectedLoans.find(l => l.id === loan.id)?.note || ''}
+                    value={selectedLoans[loan.id]?.note || ''}
                     onChange={(e) => handleNoteChange(loan.id, e.target.value)}
                     onClick={(e) => e.stopPropagation()}
                     multiline
@@ -414,10 +522,10 @@ const ReturnBooksDialog = ({ open, onClose, onSuccess, preselectedLoan }) => {
           </Paper>
         ))}
         
-        {selectedLoans.length > 0 && (
+        {Object.keys(selectedLoans).length > 0 && (
           <Paper sx={{ p: 2, bgcolor: 'primary.light', color: 'white' }}>
             <Typography variant="subtitle1" sx={{ fontWeight: 'bold' }}>
-              {selectedLoans.length} book(s) selected for return
+              {Object.keys(selectedLoans).length} book(s) selected for return
             </Typography>
           </Paper>
         )}
@@ -528,7 +636,7 @@ const ReturnBooksDialog = ({ open, onClose, onSuccess, preselectedLoan }) => {
         <DialogActions sx={{ px: 3, py: 2 }}>
           <Box sx={{ mr: 'auto' }}>
             <Typography variant="body2" color="text.secondary">
-              {selectedLoans.length} book(s) selected
+              {Object.keys(selectedLoans).length} book(s) selected
             </Typography>
           </Box>
           <Button onClick={onClose} sx={{ mr: 1 }}>
@@ -539,7 +647,7 @@ const ReturnBooksDialog = ({ open, onClose, onSuccess, preselectedLoan }) => {
             color="primary"
             startIcon={returning ? <CircularProgress size={20} /> : <ReturnIcon />}
             onClick={handleReturnBooks}
-            disabled={returning || selectedLoans.length === 0}
+            disabled={returning || Object.keys(selectedLoans).length === 0}
           >
             {returning ? 'Processing...' : 'Return Selected Books'}
           </Button>

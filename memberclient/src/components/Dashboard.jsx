@@ -32,6 +32,7 @@ import LogoutIcon from '@mui/icons-material/Logout';
 import WarningIcon from '@mui/icons-material/Warning';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ReturnBooksDialog from './ReturnBooksDialog';
+import QRScannerButton from './QRScannerButton';
 
 const Dashboard = () => {
   const { member, logout } = useAuth();
@@ -189,8 +190,18 @@ const Dashboard = () => {
     }
   };
   
+  // Add a handler for QR scanner success
+  const handleQRScannerSuccess = (result) => {
+    console.log('QR scan return successful:', result);
+    // Refresh loans and stats after successful return via QR scanner
+    handleReturnBooksSuccess(result);
+  };
+  
   return (
     <Box sx={{ p: 3, maxWidth: 1200, mx: 'auto' }}>
+      {/* Add QR Scanner Button */}
+      <QRScannerButton onSuccess={handleQRScannerSuccess} />
+      
       <Grid container spacing={3}>
         {/* Header */}
         <Grid item xs={12}>

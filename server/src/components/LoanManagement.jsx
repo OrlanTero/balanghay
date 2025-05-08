@@ -4435,15 +4435,7 @@ Please check the active loans list and use the direct return buttons instead.`;
                           >
                             Scan to Return Books
                           </Typography>
-                      <Typography
-                        variant="caption"
-                            sx={{ 
-                              display: "block",
-                              color: "text.secondary" 
-                            }}
-                      >
-                            Use the QR Scanner in Loan Management
-                      </Typography>
+                   
                     </Box>
                       )}
                   </Box>
