@@ -238,6 +238,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
       getMonthlyCheckouts: () => ipcRenderer.invoke("dashboard:getMonthlyCheckouts"),
     },
   },
+
+  // File dialog operations
+  showOpenDialog: (options) => ipcRenderer.invoke("dialog:showOpen", options),
+  showSaveDialog: (options) => ipcRenderer.invoke("dialog:showSave", options),
+  
+  // Database backup and restore operations
+  backupDatabase: (path) => ipcRenderer.invoke("database:backup", path),
+  restoreDatabase: (path) => ipcRenderer.invoke("database:restore", path),
 });
 
 // Expose API for legacy compatibility
@@ -374,6 +382,12 @@ contextBridge.exposeInMainWorld("api", {
 
   // Database management
   resetDatabase: () => ipcRenderer.invoke("database:reset"),
+  backupDatabase: (path) => ipcRenderer.invoke("database:backup", path),
+  restoreDatabase: (path) => ipcRenderer.invoke("database:restore", path),
+  
+  // Dialog operations
+  showOpenDialog: (options) => ipcRenderer.invoke("dialog:showOpen", options),
+  showSaveDialog: (options) => ipcRenderer.invoke("dialog:showSave", options),
 
   // Loans
   getAllLoans: () => ipcRenderer.invoke("loans:getAll"),
@@ -476,6 +490,14 @@ contextBridge.exposeInMainWorld("api", {
       throw error;
     }
   },
+
+  // Add new dialog functions
+  showOpenDialog: (options) => ipcRenderer.invoke("dialog:showOpen", options),
+  showSaveDialog: (options) => ipcRenderer.invoke("dialog:showSave", options),
+
+  // Add new database backup/restore functions
+  backupDatabase: (path) => ipcRenderer.invoke("database:backup", path),
+  restoreDatabase: (path) => ipcRenderer.invoke("database:restore", path),
 });
 
 // Expose Node.js process versions

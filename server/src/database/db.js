@@ -2550,6 +2550,156 @@ async function getLoanDetails(loanId) {
   }
 }
 
+// Add backup/restore functions
+
+/**
+ * Backup the database to a specified path
+ * @param {string} backupPath - The path to save the backup file
+ * @returns {Object} Result object with success flag and message
+ */
+const backupDatabase = async (backupPath) => {
+  try {
+    const dbPath = getDatabasePath();
+    
+    // Ensure the database exists
+    if (!fs.existsSync(dbPath)) {
+      return { 
+        success: false, 
+        message: "Database file not found. Cannot create backup." 
+      };
+    }
+
+    // Make sure the backup directory exists
+    const backupDir = path.dirname(backupPath);
+    if (!fs.existsSync(backupDir)) {
+      fs.mkdirSync(backupDir, { recursive: true });
+    }
+
+    // First close any open database connections to ensure file is not locked
+    try {
+      await db.destroy();
+      console.log("Database connection closed for backup");
+    } catch (closeError) {
+      console.warn("Error closing database connection:", closeError.message);
+      // Continue with backup attempt
+    }
+
+    // Copy the database file
+    fs.copyFileSync(dbPath, backupPath);
+    console.log(`Database backed up to ${backupPath}`);
+
+    // Reinitialize the database connection
+    db = initDatabaseConnection(dbPath);
+
+    return { 
+      success: true, 
+      message: "Database backup created successfully",
+      backupPath
+    };
+  } catch (error) {
+    console.error("Error backing up database:", error);
+    
+    // Ensure database connection is restored even after error
+    try {
+      const dbPath = getDatabasePath();
+      db = initDatabaseConnection(dbPath);
+    } catch (reconnectError) {
+      console.error("Failed to reconnect to database after backup attempt:", reconnectError);
+    }
+    
+    return { 
+      success: false, 
+      message: `Failed to back up database: ${error.message}` 
+    };
+  }
+};
+
+/**
+ * Restore the database from a specified backup path
+ * @param {string} backupPath - The path to the backup file
+ * @returns {Object} Result object with success flag and message
+ */
+const restoreDatabase = async (backupPath) => {
+  try {
+    // Verify backup file exists
+    if (!fs.existsSync(backupPath)) {
+      return { 
+        success: false, 
+        message: "Backup file not found." 
+      };
+    }
+
+    const dbPath = getDatabasePath();
+    
+    // Close the current database connection
+    try {
+      await db.destroy();
+      console.log("Database connection closed for restore");
+    } catch (closeError) {
+      console.warn("Error closing database connection:", closeError.message);
+      // Continue with restore attempt
+    }
+
+    // Create backup of current database before replacing it
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const currentBackupPath = `${dbPath}.before-restore.${timestamp}`;
+    
+    try {
+      if (fs.existsSync(dbPath)) {
+        fs.copyFileSync(dbPath, currentBackupPath);
+        console.log(`Created backup of current database at ${currentBackupPath}`);
+      }
+    } catch (backupError) {
+      console.warn("Failed to backup current database before restore:", backupError.message);
+      // Continue with restore
+    }
+
+    // Copy the backup file to replace the current database
+    fs.copyFileSync(backupPath, dbPath);
+    console.log(`Database restored from ${backupPath}`);
+
+    // Reinitialize the database connection
+    db = initDatabaseConnection(dbPath);
+
+    // Verify the restored database
+    try {
+      const version = await getDatabaseVersion();
+      console.log("Restored database version:", version);
+      
+      // Ensure the admin user exists
+      await ensureAdminUser(db);
+      
+      // Run a quick health check
+      const healthCheck = await checkDatabaseHealth(db);
+      if (!healthCheck.success) {
+        console.warn("Database health check after restore shows issues:", healthCheck.message);
+      }
+    } catch (verifyError) {
+      console.warn("Database verification after restore encountered issues:", verifyError.message);
+    }
+
+    return { 
+      success: true, 
+      message: "Database restored successfully" 
+    };
+  } catch (error) {
+    console.error("Error restoring database:", error);
+    
+    // Attempt to reinitialize the database connection
+    try {
+      const dbPath = getDatabasePath();
+      db = initDatabaseConnection(dbPath);
+    } catch (reconnectError) {
+      console.error("Failed to reconnect to database after restore attempt:", reconnectError);
+    }
+    
+    return { 
+      success: false, 
+      message: `Failed to restore database: ${error.message}` 
+    };
+  }
+};
+
 module.exports = {
   db,
   initDb,
@@ -2613,5 +2763,9 @@ module.exports = {
   getDatabaseVersion,
   getDb,
   ensureAdminUser,
-  getLoanDetails
+  getLoanDetails,
+  
+  // New backup/restore functions
+  backupDatabase,
+  restoreDatabase
 };

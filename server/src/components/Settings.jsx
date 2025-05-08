@@ -51,6 +51,7 @@ import {
   Check as CheckIcon,
 } from "@mui/icons-material";
 import DatabaseManager from "./DatabaseManager";
+import BackupRestore from "./BackupRestore";
 
 const Settings = () => {
   const [activeTab, setActiveTab] = useState(0);
@@ -1167,45 +1168,9 @@ const Settings = () => {
           {activeTab === 2 && (
             <Grid container spacing={3}>
               <Grid item xs={12}>
-                <Typography variant="h6" gutterBottom>
-                  Database Backup and Restore
-                </Typography>
-                <Typography variant="body2" color="text.secondary" paragraph>
-                  Backup your library database to prevent data loss. You can
-                  restore your data from a previous backup.
-                </Typography>
+                <BackupRestore />
               </Grid>
-
-              <Grid item xs={12} md={6}>
-                <Button
-                  variant="contained"
-                  startIcon={<BackupIcon />}
-                  sx={{
-                    bgcolor: "var(--primary)",
-                    "&:hover": {
-                      bgcolor: "var(--primary-dark)",
-                    },
-                    mr: 2,
-                  }}
-                >
-                  Create Backup
-                </Button>
-                <Button
-                  variant="outlined"
-                  startIcon={<RestoreIcon />}
-                  sx={{
-                    borderColor: "var(--primary)",
-                    color: "var(--primary)",
-                    "&:hover": {
-                      borderColor: "var(--primary-dark)",
-                      color: "var(--primary-dark)",
-                    },
-                  }}
-                >
-                  Restore Backup
-                </Button>
-              </Grid>
-
+              
               <Grid item xs={12}>
                 <Divider sx={{ my: 3 }} />
                 <DatabaseManager />

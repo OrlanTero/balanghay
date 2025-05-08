@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, shell, protocol, session } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu, shell, protocol, session, dialog } = require("electron");
 const path = require("node:path");
 const SettingsStore = require("./settings-store");
 const { createApiServer, IP_ADDRESS, PORT } = require("./api-server");
@@ -107,6 +107,8 @@ const {
   getMonthlyCheckouts,
   getDatabasePath,
   getLoanDetails,
+  backupDatabase,
+  restoreDatabase,
 } = require("./database/db");
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
@@ -1221,6 +1223,62 @@ function setupIpcHandlers() {
     } catch (error) {
       console.error(`Error in loans:getLoanDetails: ${error.message}`);
       return { success: false, error: error.message };
+    }
+  });
+
+  // File dialog handlers
+  ipcMain.handle("dialog:showOpen", async (event, options) => {
+    try {
+      const result = await dialog.showOpenDialog(options);
+      return result;
+    } catch (error) {
+      console.error("Error showing open dialog:", error);
+      return {
+        canceled: true,
+        error: error.message
+      };
+    }
+  });
+
+  ipcMain.handle("dialog:showSave", async (event, options) => {
+    try {
+      const result = await dialog.showSaveDialog(options);
+      return result;
+    } catch (error) {
+      console.error("Error showing save dialog:", error);
+      return {
+        canceled: true,
+        error: error.message
+      };
+    }
+  });
+
+  // Database backup and restore handlers
+  ipcMain.handle("database:backup", async (event, path) => {
+    try {
+      console.log(`Attempting to backup database to ${path}`);
+      const result = await backupDatabase(path);
+      return result;
+    } catch (error) {
+      console.error("Error backing up database:", error);
+      return {
+        success: false,
+        message: `Error backing up database: ${error.message}`,
+      };
+    }
+  });
+
+  ipcMain.handle("database:restore", async (event, path) => {
+    try {
+      console.log(`Attempting to restore database from ${path}`);
+      const result = await restoreDatabase(path);
+      return result;
+    } catch (error) {
+      console.error("Error restoring database:", error);
+      return {
+        success: false,
+        message: `Error restoring database: ${error.message}`,
+      };
     }
   });
 }
