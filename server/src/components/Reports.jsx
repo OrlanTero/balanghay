@@ -1019,15 +1019,17 @@ const Reports = () => {
         <Grid item xs={12} lg={8}>
           <Paper elevation={3} sx={{ 
             p: { xs: 2, sm: 3 }, 
-            height: '100%', 
-            width: '100%',
+            height: '100%',
+            width: '100%', 
             minHeight: { xs: 300, sm: 400 },
             borderRadius: 2,
             transition: 'transform 0.3s ease',
             '&:hover': {
               transform: 'translateY(-5px)',
               boxShadow: 6
-            }
+            },
+            display: 'flex',
+            flexDirection: 'column'
           }}>
             <Typography variant="h6" gutterBottom sx={{ fontSize: { xs: '1.1rem', md: '1.25rem' } }}>
               Monthly Checkouts

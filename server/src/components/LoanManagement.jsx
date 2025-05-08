@@ -174,6 +174,7 @@ const LoanManagement = () => {
 
   // Add state for QR popup
   const [qrPopoverAnchor, setQrPopoverAnchor] = useState(null);
+  const [qrPopoverOpen, setQrPopoverOpen] = useState(false);
   const [currentLoanQR, setCurrentLoanQR] = useState(null);
 
   const [hasSchemaIssue, setHasSchemaIssue] = useState(false);
@@ -2813,6 +2814,7 @@ Please check the active loans list and use the direct return buttons instead.`;
 
           setCurrentLoanQR(blobUrl);
           setQrPopoverAnchor(event.currentTarget);
+          setQrPopoverOpen(true);
         } else {
           throw new Error("Failed to extract base64 data from QR code");
         }
@@ -2865,6 +2867,7 @@ Please check the active loans list and use the direct return buttons instead.`;
   };
 
   const handleCloseQRPopover = () => {
+    setQrPopoverOpen(false);
     setQrPopoverAnchor(null);
   };
 
@@ -4861,7 +4864,7 @@ Please check the active loans list and use the direct return buttons instead.`;
 
       {/* QR Code Popover */}
       <Popover
-        open={Boolean(qrPopoverAnchor)}
+        open={qrPopoverOpen}
         anchorEl={qrPopoverAnchor}
         onClose={handleCloseQRPopover}
         anchorOrigin={{
