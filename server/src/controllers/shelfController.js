@@ -125,6 +125,19 @@ const addShelf = asyncHandler(async (req, res) => {
     return errorResponse(res, 'Shelf name is required', 400);
   }
   
+  // Handle shelf_code to code mapping if needed
+  if (shelfData.shelf_code !== undefined) {
+    shelfData.code = shelfData.shelf_code;
+    delete shelfData.shelf_code;
+  } else {
+    // Generate a default shelf code if not provided
+    // Format: first 3 chars of location + first 3 chars of name + random 3-digit number
+    const locationPrefix = (shelfData.location || '').substring(0, 3).toUpperCase();
+    const namePrefix = (shelfData.name || '').substring(0, 3).toUpperCase();
+    const randomNum = Math.floor(Math.random() * 900) + 100; // 100-999
+    shelfData.code = `${locationPrefix}${namePrefix}${randomNum}`;
+  }
+  
   const shelf = await Shelf.addShelf(shelfData);
   return successResponse(res, { 
     message: 'Shelf added successfully', 
@@ -139,16 +152,50 @@ const addShelf = asyncHandler(async (req, res) => {
 const updateShelf = asyncHandler(async (req, res) => {
   try {
     const { id } = req.params;
-    const updates = req.body;
+    let updates = req.body;
+    
+    console.log(`Shelf update request for ID ${id}, data:`, typeof updates, JSON.stringify(updates));
+    
+    // Enhanced validation and handling of different input formats
+    if (!updates) {
+      return errorResponse(res, 'No update data provided', 400);
+    }
+    
+    // Handle case where updates might be nested inside a 'shelf' property
+    if (updates.shelf && typeof updates.shelf === 'object') {
+      console.log('Detected nested shelf structure, extracting inner shelf data');
+      updates = updates.shelf;
+    }
+    
+    // Check if we have any data after extraction
+    if (Object.keys(updates).length === 0) {
+      return errorResponse(res, 'No valid fields provided for update', 400);
+    }
     
     // Check if shelf exists
     await Shelf.getShelfById(id);
     
-    const updatedShelf = await Shelf.updateShelf(id, updates);
-    return successResponse(res, { 
-      message: 'Shelf updated successfully', 
-      shelf: updatedShelf 
-    });
+    // Handle shelf_code to code mapping if needed
+    if (updates.shelf_code !== undefined) {
+      updates.code = updates.shelf_code;
+      delete updates.shelf_code;
+    }
+    
+    // If code is being updated, verify it's not empty
+    if (updates.code !== undefined && !updates.code) {
+      return errorResponse(res, 'Shelf code cannot be empty', 400);
+    }
+    
+    try {
+      const updatedShelf = await Shelf.updateShelf(id, updates);
+      return successResponse(res, { 
+        message: 'Shelf updated successfully', 
+        shelf: updatedShelf 
+      });
+    } catch (updateError) {
+      console.error('Error updating shelf:', updateError);
+      return errorResponse(res, `Failed to update shelf: ${updateError.message}`, 500);
+    }
   } catch (error) {
     if (error.message.includes('not found')) {
       return notFoundResponse(res, 'Shelf');

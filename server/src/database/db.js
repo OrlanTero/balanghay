@@ -544,7 +544,7 @@ const getAllLoans = async () => {
     });
 };
 
-const getLoansByMember = (memberId) => {
+const getLoansByMember = async (memberId) => {
   console.log(
     `DB: Getting loans for member ID: ${memberId}, type: ${typeof memberId}`
   );
@@ -562,7 +562,9 @@ const getLoansByMember = (memberId) => {
   id = id.toString().replace("member-", "");
   id = parseInt(id, 10);
 
-  return db("loans")
+  const database = await getDb();
+
+  return database("loans")
     .join("book_copies", "loans.book_copy_id", "book_copies.id")
     .join("books", "book_copies.book_id", "books.id")
     .join("members", "loans.member_id", "members.id")
@@ -635,8 +637,9 @@ const getLoansByMember = (memberId) => {
     });
 };
 
-const getActiveLoans = () =>
-  db("loans")
+const getActiveLoans = async () => {
+  const database = await getDb();
+  return database("loans")
     .join("book_copies", "loans.book_copy_id", "book_copies.id")
     .join("books", "book_copies.book_id", "books.id")
     .join("members", "loans.member_id", "members.id")
@@ -708,12 +711,14 @@ const getActiveLoans = () =>
       
       return groupedLoans;
     });
+};
 
-const getOverdueLoans = () => {
+const getOverdueLoans = async () => {
   const today = new Date();
   today.setHours(0, 0, 0, 0); // Set to start of today
 
-  return db("loans")
+  const database = await getDb();
+  return database("loans")
     .join("book_copies", "loans.book_copy_id", "book_copies.id")
     .join("books", "book_copies.book_id", "books.id")
     .join("members", "loans.member_id", "members.id")
@@ -852,13 +857,34 @@ const borrowBooks = (memberData) => {
     }
 
     // Handle single book_copy_id or multiple book_copies
-    const bookCopiesArray = book_copies
-      ? Array.isArray(book_copies)
-        ? book_copies
-        : [book_copies]
-      : book_copy_id
-      ? [book_copy_id]
-      : [];
+    let bookCopiesArray = [];
+    
+    // Handle different ways book copies might be provided
+    if (book_copies) {
+      // If book_copies is provided, it can be an array or a single value
+      if (Array.isArray(book_copies)) {
+        bookCopiesArray = book_copies;
+      } else if (typeof book_copies === 'string') {
+        // It could be a comma-separated list or a single value
+        bookCopiesArray = book_copies.includes(',') 
+          ? book_copies.split(',').map(id => id.trim()) 
+          : [book_copies];
+      } else {
+        // Handle case where it might be a number
+        bookCopiesArray = [book_copies.toString()];
+      }
+    } else if (book_copy_id) {
+      // Handle book_copy_id similarly
+      if (Array.isArray(book_copy_id)) {
+        bookCopiesArray = book_copy_id;
+      } else if (typeof book_copy_id === 'string') {
+        bookCopiesArray = book_copy_id.includes(',') 
+          ? book_copy_id.split(',').map(id => id.trim()) 
+          : [book_copy_id];
+      } else {
+        bookCopiesArray = [book_copy_id.toString()];
+      }
+    }
 
     if (bookCopiesArray.length === 0) {
       throw new Error("No book copy IDs provided");
@@ -866,17 +892,54 @@ const borrowBooks = (memberData) => {
 
     console.log(`Borrowing book copies: ${bookCopiesArray.join(", ")}`);
 
-    // Check if any of the copies are already checked out
-    const unavailableBooks = await trx("book_copies")
+    // First, validate that all book copies exist
+    const existingBookCopies = await trx("book_copies")
       .whereIn("id", bookCopiesArray)
-      .andWhere("status", "!=", "Available")
-      .select("id", "barcode");
+      .select("id", "barcode", "status");
+    
+    // Check for non-existent book copies
+    if (existingBookCopies.length !== bookCopiesArray.length) {
+      // Find which IDs don't exist
+      const existingIds = existingBookCopies.map(copy => copy.id.toString());
+      const missingIds = bookCopiesArray.filter(id => !existingIds.includes(id.toString()));
+      
+      throw new Error(`Some book copies do not exist: ${missingIds.join(", ")}`);
+    }
+
+    // Now check if any of the copies are already checked out or otherwise unavailable
+    const unavailableBooks = existingBookCopies.filter(copy => copy.status !== "Available");
 
     if (unavailableBooks.length > 0) {
+      // Get detailed information about unavailable books
+      const unavailableDetails = await trx("book_copies")
+        .join("books", "book_copies.book_id", "books.id")
+        .leftJoin("loans", function() {
+          this.on("book_copies.id", "=", "loans.book_copy_id")
+              .andOnVal("loans.status", "!=", "Returned");
+        })
+        .leftJoin("members", "loans.member_id", "members.id")
+        .whereIn("book_copies.id", unavailableBooks.map(b => b.id))
+        .select(
+          "book_copies.id",
+          "book_copies.barcode",
+          "book_copies.status",
+          "books.title",
+          "loans.due_date",
+          "members.name as borrowed_by"
+        );
+      
+      // Prepare a detailed error message
+      const detailedMessages = unavailableDetails.map(book => {
+        let message = `${book.title} (${book.barcode}) - Status: ${book.status}`;
+        if (book.status === "Checked Out" && book.borrowed_by) {
+          const dueDate = new Date(book.due_date).toLocaleDateString();
+          message += `, borrowed by ${book.borrowed_by}, due on ${dueDate}`;
+        }
+        return message;
+      });
+      
       throw new Error(
-        `Some book copies are not available: ${unavailableBooks
-          .map((b) => b.barcode)
-          .join(", ")}`
+        `The following books are not available:\n${detailedMessages.join("\n")}`
       );
     }
 
@@ -922,9 +985,52 @@ const borrowBooks = (memberData) => {
   });
 };
 
-const returnBooks = (loanIds) => {
+const returnBooks = (loanIdsOrData) => {
   return db.transaction(async (trx) => {
     const today = new Date();
+    
+    // Handle different input formats
+    let loanIds = [];
+    let returnDataByLoanId = {}; // For storing returnCondition and notes
+    
+    // Process the input data
+    if (Array.isArray(loanIdsOrData)) {
+      // Legacy format - just an array of loan IDs
+      console.log("Processing as array of loan IDs");
+      loanIds = loanIdsOrData;
+    } else if (loanIdsOrData && loanIdsOrData.returns && Array.isArray(loanIdsOrData.returns)) {
+      // New format - object with returns array
+      console.log("Processing as object with returns array");
+      
+      // Extract loan IDs 
+      loanIds = loanIdsOrData.returns
+        .filter(item => item && (item.loan_id || item.loanId)) 
+        .map(item => item.loan_id || item.loanId);
+      
+      // Build a lookup object for return conditions and notes
+      loanIdsOrData.returns.forEach(item => {
+        if (item && (item.loan_id || item.loanId)) {
+          const loanId = item.loan_id || item.loanId;
+          returnDataByLoanId[loanId] = {
+            returnCondition: item.returnCondition || 'Good',
+            note: item.note || ''
+          };
+        }
+      });
+    } else if (typeof loanIdsOrData === 'number' || 
+               (typeof loanIdsOrData === 'string' && !isNaN(Number(loanIdsOrData)))) {
+      // Single loan ID
+      console.log("Processing as single loan ID");
+      loanIds = [Number(loanIdsOrData)];
+    } else {
+      console.log("Unable to determine loan IDs format:", loanIdsOrData);
+      throw new Error("Invalid format for loan IDs");
+    }
+    
+    // Make sure we have valid loan IDs
+    if (loanIds.length === 0) {
+      throw new Error("No valid loan IDs provided");
+    }
 
     // Get all the loans
     const loans = await trx("loans").whereIn("id", loanIds).select("*");
@@ -949,11 +1055,23 @@ const returnBooks = (loanIds) => {
         
         // Update all loans in the batch to returned
         const batchLoanIds = batchLoans.map(loan => loan.id);
-        await trx("loans").whereIn("id", batchLoanIds).update({
+        
+        // Process each loan in the batch
+        for (const loan of batchLoans) {
+          const updateData = {
           status: "Returned",
           return_date: today,
-          updated_at: today,
-        });
+            updated_at: today
+          };
+          
+          // Add return condition and note if available
+          if (returnDataByLoanId[loan.id]) {
+            updateData.return_condition = returnDataByLoanId[loan.id].returnCondition;
+            updateData.return_note = returnDataByLoanId[loan.id].note;
+          }
+          
+          await trx("loans").where("id", loan.id).update(updateData);
+        }
         
         // Update all books to available
         const bookCopiesIds = batchLoans.map((loan) => loan.book_copy_id);
@@ -970,12 +1088,22 @@ const returnBooks = (loanIds) => {
       }
     }
 
-    // Regular case - update the specified loans
-    await trx("loans").whereIn("id", loanIds).update({
+    // Regular case - update each loan individually to capture return conditions
+    for (const loan of loans) {
+      const updateData = {
       status: "Returned",
       return_date: today,
-      updated_at: today,
-    });
+        updated_at: today
+      };
+      
+      // Add return condition and note if available
+      if (returnDataByLoanId[loan.id]) {
+        updateData.return_condition = returnDataByLoanId[loan.id].returnCondition;
+        updateData.return_note = returnDataByLoanId[loan.id].note;
+      }
+      
+      await trx("loans").where("id", loan.id).update(updateData);
+    }
 
     // Update all books to available
     const bookCopiesIds = loans.map((loan) => loan.book_copy_id);
@@ -998,20 +1126,104 @@ const returnBooksViaQRCode = (qrData) => {
       const data = typeof qrData === "string" ? JSON.parse(qrData) : qrData;
 
       // Extract loan IDs from the QR code data
-      const { loansIds, transactionId, memberId } = data;
+      const { loansIds, transactionId, memberId, skipMemberCheck } = data;
 
       if (!loansIds || !Array.isArray(loansIds) || loansIds.length === 0) {
         throw new Error("No valid loan IDs found in QR code");
       }
 
-      // Verify that the loans belong to the specified member
-      const loans = await trx("loans")
-        .whereIn("id", loansIds)
-        .andWhere("member_id", memberId)
-        .select("*");
-
+      // First, try to get the loans without any member filter
+      let loans = await trx("loans").whereIn("id", loansIds).select("*");
+      
+      // Log what we found
+      console.log(`Found ${loans.length} loans with IDs: ${loansIds.join(', ')}`);
+      
+      // If no loans found with these IDs, try to provide helpful information
       if (loans.length === 0) {
-        throw new Error("No valid loans found for this member");
+        // Get info about active loans for context
+        const activeLoansCount = await trx("loans")
+          .whereNull("return_date")
+          .count("* as count")
+          .first();
+          
+        console.log(`Total active loans in system: ${activeLoansCount.count}`);
+        
+        // If member ID is provided, check if they have any active loans
+        if (memberId) {
+          const memberLoans = await trx("loans")
+            .where({ member_id: memberId })
+            .whereNull("return_date")
+            .select("id")
+            .orderBy("id", "desc")
+            .limit(5);
+            
+          if (memberLoans.length > 0) {
+            const memberLoanIds = memberLoans.map(l => l.id);
+            console.log(`Member ID ${memberId} has active loans with IDs: ${memberLoanIds.join(', ')}`);
+            
+            // Check if the loan might already be returned
+            const returnedLoans = await trx("loans")
+              .whereIn("id", loansIds)
+              .where({ status: "Returned" })
+              .select("id", "return_date")
+              .orderBy("id");
+              
+            if (returnedLoans.length > 0) {
+              throw new Error(`Loans with IDs ${returnedLoans.map(l => l.id).join(', ')} have already been returned`);
+            }
+            
+            throw new Error(`No active loans found with IDs: ${loansIds.join(', ')}. Member has different active loans: ${memberLoanIds.join(', ')}`);
+          } else {
+            // Check if the member has any returned loans
+            const returnedLoans = await trx("loans")
+              .where({ member_id: memberId, status: "Returned" })
+              .select("id")
+              .orderBy("id", "desc")
+              .limit(5);
+              
+            if (returnedLoans.length > 0) {
+              throw new Error(`Member ID ${memberId} has no active loans. All loans have been returned.`);
+            } else {
+              throw new Error(`Member ID ${memberId} has no loans in the system.`);
+            }
+          }
+        } else {
+          // No member ID, just report on the general loan status
+          const recentLoans = await trx("loans")
+            .whereNull("return_date")
+            .select("id", "member_id")
+            .orderBy("id", "desc")
+            .limit(5);
+            
+          if (recentLoans.length > 0) {
+            const recentIds = recentLoans.map(l => l.id);
+            throw new Error(`No loans found with IDs: ${loansIds.join(', ')}. Recent active loan IDs: ${recentIds.join(', ')}`);
+          } else {
+            throw new Error(`No loans found with IDs: ${loansIds.join(', ')}. There are currently no active loans in the system.`);
+          }
+        }
+      }
+      
+      // If memberId is provided and we're not skipping the check, validate that these loans belong to the member
+      if (memberId && !skipMemberCheck) {
+        console.log(`Validating loans belong to member ID: ${memberId}`);
+        
+        // Check if any loans belong to this member
+        const memberLoans = loans.filter(loan => Number(loan.member_id) === Number(memberId));
+        
+        if (memberLoans.length === 0) {
+          console.log(`None of the loans belong to member ID: ${memberId}`);
+          console.log(`Loan member IDs: ${loans.map(l => l.member_id).join(', ')}`);
+          
+          // Instead of failing, we'll continue but log a warning
+          console.warn(`WARNING: Processing loans not associated with provided member ID: ${memberId}`);
+        } else if (memberLoans.length < loans.length) {
+          // Some but not all loans belong to this member
+          console.warn(`WARNING: Some loans don't belong to member ID: ${memberId}, will only process ${memberLoans.length} of ${loans.length} loans`);
+          loans = memberLoans;
+        } else {
+          console.log(`All ${loans.length} loans belong to member ID: ${memberId}`);
+        }
       }
 
       // Check if any loans are already returned
@@ -1020,6 +1232,17 @@ const returnBooksViaQRCode = (qrData) => {
       );
       if (alreadyReturned.length > 0) {
         console.log(`${alreadyReturned.length} books already returned`);
+        
+        // If ALL loans are already returned, send a success message
+        if (alreadyReturned.length === loans.length) {
+          return {
+            success: true,
+            message: `All ${loans.length} books have already been returned`,
+            count: 0,
+            transactionId,
+            alreadyReturned: true
+          };
+        }
       }
 
       // Get only unreturned loans
@@ -1031,6 +1254,7 @@ const returnBooksViaQRCode = (qrData) => {
           message: "All books already returned",
           count: 0,
           transactionId,
+          alreadyReturned: true
         };
       }
 
@@ -1248,10 +1472,118 @@ const getShelfById = (id) => {
     });
 };
 
-const addShelf = (shelf) => db("shelves").insert(shelf).returning("*");
+const addShelf = async (shelf) => {
+  console.log('Adding shelf with data:', JSON.stringify(shelf));
+  
+  try {
+    // First check if we have a code field to use
+    if (!shelf.code && !shelf.shelf_code) {
+      // Generate a default shelf code if not provided
+      // Format: first 3 chars of location + first 3 chars of name + random 3-digit number
+      const locationPrefix = (shelf.location || '').substring(0, 3).toUpperCase();
+      const namePrefix = (shelf.name || '').substring(0, 3).toUpperCase();
+      const randomNum = Math.floor(Math.random() * 900) + 100; // 100-999
+      shelf.code = `${locationPrefix}${namePrefix}${randomNum}`;
+      console.log('Generated default code:', shelf.code);
+    }
+    
+    // Map shelf_code to code if needed
+    if (shelf.shelf_code !== undefined && shelf.code === undefined) {
+      shelf.code = shelf.shelf_code;
+      delete shelf.shelf_code;
+    }
+    
+    // Check table schema to see if we have shelf_code column
+    try {
+      const hasShelfCodeColumn = await db.schema.hasColumn('shelves', 'shelf_code');
+      console.log('Has shelf_code column:', hasShelfCodeColumn);
+      
+      if (hasShelfCodeColumn) {
+        // If table has shelf_code column, make sure we use it
+        if (shelf.code !== undefined) {
+          shelf.shelf_code = shelf.code;
+          delete shelf.code;
+        }
+      }
+    } catch (schemaError) {
+      console.error('Error checking schema:', schemaError);
+      // Fallback - try both ways
+      if (shelf.code !== undefined) {
+        shelf.shelf_code = shelf.code;
+      }
+    }
+    
+    console.log('Final shelf data for insertion:', JSON.stringify(shelf));
+    return await db("shelves").insert(shelf).returning("*");
+  } catch (error) {
+    console.error('Error adding shelf:', error);
+    throw error;
+  }
+};
 
-const updateShelf = (id, shelf) =>
-  db("shelves").where({ id }).update(shelf).returning("*");
+const updateShelf = async (id, shelf) => {
+  console.log(`Updating shelf ID ${id} with data:`, typeof shelf, JSON.stringify(shelf));
+  
+  try {
+    // Handle potential complex input formats
+    let shelfData;
+    
+    // Ensure shelf is not undefined
+    if (!shelf) {
+      throw new Error('No shelf data provided for update');
+    }
+    
+    // Handle case where shelf might be another object containing a shelf property
+    if (typeof shelf === 'object' && shelf.shelf && typeof shelf.shelf === 'object') {
+      console.log('Detected nested shelf object structure, extracting inner shelf');
+      shelfData = { ...shelf.shelf };
+    } else {
+      // Normal case - regular shelf object
+      shelfData = { ...shelf };
+    }
+    
+    console.log('Using shelf data:', JSON.stringify(shelfData));
+    
+    // Map shelf_code to code if needed
+    if (shelfData.shelf_code !== undefined && shelfData.code === undefined) {
+      shelfData.code = shelfData.shelf_code;
+      delete shelfData.shelf_code;
+    }
+    
+    // Check table schema to see if we have shelf_code column
+    try {
+      const hasShelfCodeColumn = await db.schema.hasColumn('shelves', 'shelf_code');
+      console.log('Has shelf_code column:', hasShelfCodeColumn);
+      
+      if (hasShelfCodeColumn) {
+        // If table has shelf_code column, make sure we use it
+        if (shelfData.code !== undefined) {
+          shelfData.shelf_code = shelfData.code;
+          delete shelfData.code;
+        }
+      }
+    } catch (schemaError) {
+      console.error('Error checking schema:', schemaError);
+      // Fallback - try both ways if we have a code value
+      if (shelfData.code !== undefined) {
+        shelfData.shelf_code = shelfData.code;
+      }
+    }
+    
+    console.log('Final shelf update data:', JSON.stringify(shelfData));
+    
+    // Verify we have data to update
+    if (Object.keys(shelfData).length === 0) {
+      throw new Error('No valid data provided for shelf update');
+    }
+    
+    // Perform the update
+    return await db("shelves").where({ id }).update(shelfData).returning("*");
+  } catch (error) {
+    console.error(`Error updating shelf ${id}:`, error);
+    throw error;
+  }
+};
 
 const deleteShelf = (id) => db("shelves").where({ id }).del();
 
@@ -1610,6 +1942,33 @@ const getDashboardStats = async () => {
 
     const pendingReturns = overdueLoans[0].count;
 
+    // Get total shelves count
+    const [{ count: totalShelves }] = await db("shelves").count("* as count");
+
+    // Get total loans count
+    const [{ count: totalLoans }] = await db("loans").count("* as count");
+
+    // Calculate return rate (percentage of loans that were returned)
+    const [{ count: returnedLoans }] = await db("loans")
+      .where({ status: "Returned" })
+      .count("* as count");
+    
+    // Calculate return rate only if there are loans
+    const returnRate = totalLoans > 0 
+      ? Math.floor((returnedLoans / totalLoans) * 100) 
+      : 0;
+
+    // Calculate overdue rate (percentage of active loans that are overdue)
+    const [{ count: activeLoans }] = await db("loans")
+      .where({ status: "Active" })
+      .orWhere({ status: "Borrowed" })
+      .orWhere({ status: "Checked Out" })
+      .count("* as count");
+    
+    const overdueRate = activeLoans > 0 
+      ? Math.floor((parseInt(pendingReturns) / activeLoans) * 100) 
+      : 0;
+
     return {
       success: true,
       data: {
@@ -1617,6 +1976,10 @@ const getDashboardStats = async () => {
         activeMembers,
         booksCheckedOut,
         pendingReturns,
+        totalShelves,
+        totalLoans,
+        returnRate,
+        overdueRate
       },
     };
   } catch (error) {
@@ -1814,7 +2177,88 @@ const updateBooksTable = async () => {
 };
 
 const updateLoansTable = async () => {
-  return { success: true, message: "Migration functions disabled" };
+  try {
+    // Check if table exists, if not, create it
+    const hasTable = await db.schema.hasTable("loans");
+    if (!hasTable) {
+      console.log("Creating loans table...");
+      await db.schema.createTable("loans", (table) => {
+        table.increments("id").primary();
+        table.integer("member_id").notNullable();
+        table.integer("book_id").notNullable();
+        table.date("checkout_date").notNullable();
+        table.date("due_date").notNullable();
+        table.date("return_date").nullable();
+        table.string("status").defaultTo("Checked Out");
+        table.timestamps(true, true);
+      });
+      console.log("Loans table created");
+    }
+
+    // Now check for the book_copy_id column
+    const hasBookCopyId = await db.schema
+      .hasColumn("loans", "book_copy_id")
+      .then((exists) => exists);
+
+    if (!hasBookCopyId) {
+      console.log("Adding book_copy_id column to loans table");
+      await db.schema.table("loans", (table) => {
+        table.integer("book_copy_id").nullable();
+      });
+      console.log("Added book_copy_id column to loans table");
+    }
+
+    // Check for transaction_id column
+    const hasTransactionId = await db.schema
+      .hasColumn("loans", "transaction_id")
+      .then((exists) => exists);
+
+    if (!hasTransactionId) {
+      console.log("Adding transaction_id column to loans table");
+      await db.schema.table("loans", (table) => {
+        table.string("transaction_id").nullable();
+      });
+      console.log("Added transaction_id column to loans table");
+    }
+
+    // Check for return_condition column
+    const hasReturnCondition = await db.schema
+      .hasColumn("loans", "return_condition")
+      .then((exists) => exists);
+
+    if (!hasReturnCondition) {
+      console.log("Adding return_condition column to loans table");
+      await db.schema.table("loans", (table) => {
+        table.string("return_condition").nullable();
+      });
+      console.log("Added return_condition column to loans table");
+    }
+
+    // Check for return_note column
+    const hasReturnNote = await db.schema
+      .hasColumn("loans", "return_note")
+      .then((exists) => exists);
+
+    if (!hasReturnNote) {
+      console.log("Adding return_note column to loans table");
+      await db.schema.table("loans", (table) => {
+        table.text("return_note").nullable();
+      });
+      console.log("Added return_note column to loans table");
+    }
+
+    // Return confirmation
+    return {
+      success: true,
+      message: "Loans table has been updated with all necessary columns",
+    };
+  } catch (error) {
+    console.error("Error updating loans table:", error);
+    return {
+      success: false,
+      message: `Error updating loans table: ${error.message}`,
+    };
+  }
 };
 
 const updateBookCopiesTable = async () => {
@@ -1931,7 +2375,6 @@ const authenticate = async (identifier, password) => {
           id: `member-${member.id}`,
           username: member.name,
           email: member.email,
-          password: member.pin,
           role: "member",
           status: member.status === "Active" ? "active" : "inactive",
           member_id: member.id,
@@ -2011,6 +2454,102 @@ const authenticate = async (identifier, password) => {
   }
 };
 
+// Add this new function to get detailed loan information
+async function getLoanDetails(loanId) {
+  try {
+    console.log(`Fetching detailed loan information for loan ID: ${loanId}`);
+    
+    const database = await getDb();
+    
+    // First check if this is a batch loan
+    const loan = await database("loans").where({ id: loanId }).first();
+    
+    if (!loan) {
+      throw new Error(`Loan with ID ${loanId} not found`);
+    }
+    
+    // Get all loan details including book information
+    const loanWithDetails = await database("loans")
+      .where("loans.id", loanId)
+      .join("book_copies", "loans.book_copy_id", "book_copies.id")
+      .join("books", "book_copies.book_id", "books.id")
+      .join("members", "loans.member_id", "members.id")
+      .select(
+        "loans.*",
+        "book_copies.id as book_copy_id",
+        "book_copies.barcode as book_barcode",
+        "books.id as book_id",
+        "books.title as book_title",
+        "books.isbn as book_isbn",
+        "books.author as book_author",
+        "books.cover_color as book_color",
+        "books.front_cover as book_cover",
+        "members.id as member_id",
+        "members.name as member_name",
+        "members.email as member_email"
+      )
+      .first();
+      
+    if (!loanWithDetails) {
+      throw new Error(`Detailed information for loan ID ${loanId} not found`);
+    }
+    
+    // Check if this is a batch loan by looking at the transaction_id
+    if (loan.transaction_id) {
+      // This might be part of a batch, get all loans with the same transaction_id
+      const batchLoans = await database("loans")
+        .where({ transaction_id: loan.transaction_id })
+        .join("book_copies", "loans.book_copy_id", "book_copies.id")
+        .join("books", "book_copies.book_id", "books.id")
+        .select(
+          "loans.id as loan_id",
+          "loans.status",
+          "book_copies.id as book_copy_id",
+          "book_copies.barcode as book_barcode",
+          "books.id as book_id",
+          "books.title as book_title",
+          "books.isbn as book_isbn",
+          "books.author as book_author",
+          "books.cover_color as book_color",
+          "books.front_cover as book_cover"
+        );
+        
+      if (batchLoans.length > 1) {
+        // This is a batch loan, add the individual loans information
+        console.log(`Found batch loan with ${batchLoans.length} books`);
+        
+        // Add batch information to the loan
+        const enhancedLoan = {
+          ...loanWithDetails,
+          is_batch: true,
+          loan_ids: batchLoans.map(l => l.loan_id),
+          book_titles: batchLoans.map(l => l.book_title),
+          book_authors: batchLoans.map(l => l.book_author),
+          book_isbns: batchLoans.map(l => l.book_isbn),
+          book_ids: batchLoans.map(l => l.book_id),
+          book_copy_ids: batchLoans.map(l => l.book_copy_id),
+          book_barcodes: batchLoans.map(l => l.book_barcode),
+          book_colors: batchLoans.map(l => l.book_color),
+          book_covers: batchLoans.map(l => l.book_cover),
+          total_books: batchLoans.length
+        };
+        
+        return enhancedLoan;
+      }
+    }
+    
+    // This is a regular loan, return it as is
+    return {
+      ...loanWithDetails,
+      is_batch: false,
+      total_books: 1
+    };
+  } catch (error) {
+    console.error(`Error in getLoanDetails: ${error.message}`);
+    throw error;
+  }
+}
+
 module.exports = {
   db,
   initDb,
@@ -2073,5 +2612,6 @@ module.exports = {
   checkDatabaseHealth,
   getDatabaseVersion,
   getDb,
-  ensureAdminUser
+  ensureAdminUser,
+  getLoanDetails
 };

@@ -298,25 +298,66 @@ export const getMemberStats = async (memberId) => {
     const response = await api.get(`/api/members/${memberId}/statistics`, { headers });
     console.log('Statistics response:', response.data);
     
-    // The server returns the stats directly with camelCase property names
+    // If the response is successful but has no data, return defaults
+    if (!response.data) {
+      console.warn('No data received from statistics endpoint');
+      return { 
+        stats: {
+          totalLoans: 0,
+          activeLoans: 0,
+          returnedLoans: 0,
+          overdueLoans: 0,
+          totalFines: 0,
+          unpaidFines: 0,
+          memberSince: null
+        }
+      };
+    }
+    
+    // The server returns the stats directly with camelCase property names or with snake_case
     if (response.data && response.data.stats) {
-      return { stats: response.data.stats };
+      // Make sure to convert any string numbers to actual numbers
+      const stats = response.data.stats;
+      return { 
+        stats: {
+          totalLoans: parseInt(stats.totalLoans || stats.total_loans || 0, 10),
+          activeLoans: parseInt(stats.activeLoans || stats.active_loans || 0, 10),
+          overdueLoans: parseInt(stats.overdueLoans || stats.overdue_loans || 0, 10),
+          returnedLoans: parseInt(stats.returnedLoans || stats.returned_loans || 0, 10),
+          totalFines: parseFloat(stats.totalFines || stats.total_fines || 0),
+          unpaidFines: parseFloat(stats.unpaidFines || stats.unpaid_fines || 0),
+          memberSince: stats.memberSince || stats.member_since || null
+        }
+      };
     } else if (response.data && response.data.member && response.data.stats) {
       // Sometimes the API returns both member and stats
-      return { stats: response.data.stats };
+      const stats = response.data.stats;
+      return { 
+        stats: {
+          totalLoans: parseInt(stats.totalLoans || stats.total_loans || 0, 10),
+          activeLoans: parseInt(stats.activeLoans || stats.active_loans || 0, 10),
+          overdueLoans: parseInt(stats.overdueLoans || stats.overdue_loans || 0, 10),
+          returnedLoans: parseInt(stats.returnedLoans || stats.returned_loans || 0, 10),
+          totalFines: parseFloat(stats.totalFines || stats.total_fines || 0),
+          unpaidFines: parseFloat(stats.unpaidFines || stats.unpaid_fines || 0),
+          memberSince: stats.memberSince || stats.member_since || null
+        }
+      };
     } else if (response.data) {
       // Handle case where stats might be at the top level
       // Convert the response to a stats object with consistent property names
+      const data = response.data;
+      // Convert string counts to actual numbers
       return { 
         stats: {
-          totalLoans: response.data.totalLoans || 0,
-          activeLoans: response.data.activeLoans || 0,
-          overdueLoans: response.data.overdueLoans || 0,
-          returnedLoans: response.data.returnedLoans || 
-                         (response.data.totalLoans - response.data.activeLoans) || 0,
-          totalFines: response.data.totalFines || 0,
-          unpaidFines: response.data.unpaidFines || 0,
-          memberSince: response.data.memberSince || null
+          totalLoans: parseInt(data.totalLoans || 0, 10),
+          activeLoans: parseInt(data.activeLoans || 0, 10),
+          overdueLoans: parseInt(data.overdueLoans || 0, 10),
+          returnedLoans: parseInt(data.returnedLoans || 
+                      (data.totalLoans - data.activeLoans) || 0, 10),
+          totalFines: parseFloat(data.totalFines || 0),
+          unpaidFines: parseFloat(data.unpaidFines || 0),
+          memberSince: data.memberSince || null
         }
       };
     } else {
@@ -338,9 +379,14 @@ export const getMemberStats = async (memberId) => {
     // Add more detailed error logging
     if (error.response) {
       console.error('Error response status:', error.response.status);
+      console.error('Error response data:', error.response.data);
       if (error.response.status === 401) {
         console.error('Authentication error: Token may be invalid or expired');
       }
+    } else if (error.request) {
+      console.error('No response received from server');
+    } else {
+      console.error('Error message:', error.message);
     }
     
     // Return default stats on error instead of throwing

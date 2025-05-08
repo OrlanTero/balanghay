@@ -178,6 +178,682 @@ const LoanManagement = () => {
 
   const [hasSchemaIssue, setHasSchemaIssue] = useState(false);
 
+  // Add these state variables near the beginning of the component where other states are defined
+  const [batchReturnDialogOpen, setBatchReturnDialogOpen] = useState(false);
+  const [batchLoansToReturn, setBatchLoansToReturn] = useState([]);
+  const [selectedBatchItems, setSelectedBatchItems] = useState([]);
+  const [loadingBatchLoans, setLoadingBatchLoans] = useState(false);
+
+  // Add this new function for batch return handling
+  const handleBatchReturnFromQRCode = async (loanIds, memberId = null) => {
+    try {
+      setLoadingBatchLoans(true);
+      console.log(`Fetching batch loan details for loan IDs: ${loanIds.join(', ')}`);
+      
+      // Get the full details for all loans in the batch
+      let fetchedLoans = [];
+      let batchMainLoan = null;
+      
+      // First, try to check if any of these is a batch loan
+      for (const loanId of loanIds) {
+        try {
+          console.log(`Checking if loan ${loanId} is a batch loan...`);
+          const loanDetails = await window.api.getLoanDetails(loanId);
+          console.log(`Got loan details for ${loanId}:`, loanDetails);
+          
+          if (loanDetails && loanDetails.is_batch) {
+            console.log(`Found batch loan: ${loanId}`);
+            batchMainLoan = loanDetails;
+            break;
+          } else if (loanDetails) {
+            // Check if this loan is part of a batch by checking its transaction_id
+            if (loanDetails.transaction_id && !loanDetails.is_batch) {
+              // This might be an individual loan within a batch
+              // Let's see if we can get other loans with the same transaction_id
+              console.log(`Checking if loan ${loanId} is part of a batch via transaction ID: ${loanDetails.transaction_id}`);
+              try {
+                const memberLoans = await window.api.getLoansByMember(loanDetails.member_id);
+                const relatedLoans = memberLoans.filter(loan => 
+                  loan.transaction_id === loanDetails.transaction_id && 
+                  loan.status !== 'Returned'
+                );
+                
+                if (relatedLoans.length > 1) {
+                  console.log(`Found ${relatedLoans.length} related loans through transaction ID`);
+                  // This is likely part of a batch - add all related loans
+                  fetchedLoans.push(...relatedLoans);
+                  // No need to add individually again below since we've added all related loans here
+                  continue;
+                }
+              } catch (err) {
+                console.log("Error finding related loans:", err);
+              }
+            }
+            fetchedLoans.push(loanDetails);
+          }
+        } catch (error) {
+          console.error(`Error checking loan ${loanId}:`, error);
+        }
+      }
+      
+      // If we found a batch loan, use its details
+      if (batchMainLoan) {
+        console.log(`Processing batch loan with ${batchMainLoan.total_books} books`);
+        fetchedLoans = [batchMainLoan];
+      } 
+      // Otherwise, if we have no loans but have a member ID, try getting all member loans
+      else if (fetchedLoans.length === 0 && memberId) {
+        console.log(`No batch loans found. Fetching all loans for member ${memberId}`);
+        try {
+          const memberLoans = await window.api.getLoansByMember(memberId);
+          console.log(`Found ${memberLoans.length} loans for member ${memberId}`);
+          
+          // Filter to only include active loans whose IDs match our loanIds list
+          fetchedLoans = memberLoans.filter(loan => 
+            loan.status !== 'Returned' && 
+            (loanIds.includes(loan.id) || 
+             (loan.is_batch && loan.loan_ids && loan.loan_ids.some(id => loanIds.includes(id))))
+          );
+        } catch (error) {
+          console.error(`Error fetching loans for member ${memberId}:`, error);
+          throw new Error(`Could not find loans for member. Please try another method.`);
+        }
+      }
+      
+      console.log('Fetched loans for batch return:', fetchedLoans);
+      
+      if (fetchedLoans.length === 0) {
+        throw new Error('No active loans found matching the QR code. The loans may have already been returned.');
+      }
+      
+      // Prepare the loans for display in the batch return dialog
+      const batchItems = [];
+      
+      // Process each loan to extract individual items
+      for (const loan of fetchedLoans) {
+        if (loan.is_batch && loan.book_titles && Array.isArray(loan.book_titles)) {
+          // For batch loans, process each book in the batch
+          console.log(`Processing batch loan with ${loan.book_titles.length} books`);
+          
+          // If we have individual loan IDs and their statuses, use them to filter
+          const individualLoans = [];
+          
+          // Try to find all individual loans first (if available)
+          if (loan.loan_ids && loan.loan_ids.length > 0) {
+            // For each individual loan ID, try to get details to check if it's been returned
+            for (let i = 0; i < loan.loan_ids.length; i++) {
+              try {
+                const individualId = loan.loan_ids[i];
+                if (!individualId) continue;
+                
+                // Try to get the loan status if possible
+                let individualStatus = 'Unknown';
+                try {
+                  const individualDetails = await window.api.getLoanDetails(individualId);
+                  individualStatus = individualDetails ? individualDetails.status : 'Unknown';
+                } catch (e) {
+                  console.log(`Couldn't fetch status for loan ${individualId}, will include it anyway:`, e);
+                  // If we can't determine status, assume it's active (not returned)
+                  individualStatus = loan.status || 'Checked Out';
+                }
+                
+                // Only include the loan if it hasn't been returned
+                if (individualStatus !== 'Returned') {
+                  individualLoans.push({
+                    id: individualId,
+                    index: i,
+                    status: individualStatus
+                  });
+                } else {
+                  console.log(`Skipping loan ${individualId} as it has status: ${individualStatus}`);
+                }
+              } catch (error) {
+                console.error(`Error processing individual loan at index ${i}:`, error);
+              }
+            }
+          }
+          
+          if (individualLoans.length > 0) {
+            console.log(`Found ${individualLoans.length} active individual loans within the batch`);
+            
+            // Process only the active individual loans
+            for (const individualLoan of individualLoans) {
+              const i = individualLoan.index;
+              
+              batchItems.push({
+                loanId: loan.id,
+                individualId: individualLoan.id,
+                bookCopyId: loan.book_copy_ids ? loan.book_copy_ids[i] : null,
+                title: loan.book_titles[i],
+                barcode: loan.book_barcodes ? loan.book_barcodes[i] : 'N/A',
+                author: loan.book_authors ? loan.book_authors[i] : (loan.book_author || ''),
+                cover: loan.book_covers ? loan.book_covers[i] : (loan.book_cover || null),
+                coverColor: loan.book_colors ? loan.book_colors[i] : (loan.book_color || null),
+                isbn: loan.book_isbns ? loan.book_isbns[i] : (loan.book_isbn || ''),
+                status: individualLoan.status
+              });
+            }
+          } else {
+            // Fallback: if we don't have individual statuses, just check the main loan status
+            // and include all books in the batch if the main loan is active
+            console.log('No individual loan statuses found, using batch status:', loan.status);
+            if (loan.status !== 'Returned') {
+              for (let i = 0; i < loan.book_titles.length; i++) {
+                // For books in a batch, use individual loan IDs if available
+                const individualId = loan.loan_ids && loan.loan_ids[i] 
+                  ? loan.loan_ids[i] 
+                  : null;
+                
+                batchItems.push({
+                  loanId: loan.id,
+                  individualId: individualId,
+                  bookCopyId: loan.book_copy_ids ? loan.book_copy_ids[i] : null,
+                  title: loan.book_titles[i],
+                  barcode: loan.book_barcodes ? loan.book_barcodes[i] : 'N/A',
+                  author: loan.book_authors ? loan.book_authors[i] : (loan.book_author || ''),
+                  cover: loan.book_covers ? loan.book_covers[i] : (loan.book_cover || null),
+                  coverColor: loan.book_colors ? loan.book_colors[i] : (loan.book_color || null),
+                  isbn: loan.book_isbns ? loan.book_isbns[i] : (loan.book_isbn || ''),
+                  status: loan.status
+                });
+              }
+            }
+          }
+        } else {
+          // For single book loans
+          if (loan.status !== 'Returned') {
+            batchItems.push({
+              loanId: loan.id,
+              individualId: null,
+              bookCopyId: loan.book_copy_id,
+              title: loan.book_title,
+              barcode: loan.book_barcode,
+              author: loan.book_author,
+              cover: loan.book_cover,
+              coverColor: loan.book_color,
+              isbn: loan.book_isbn || '',
+              status: loan.status
+            });
+          }
+        }
+      }
+      
+      console.log('Prepared batch items for return:', batchItems);
+      
+      if (batchItems.length === 0) {
+        throw new Error('No available books to return. All books in this batch may have already been returned.');
+      }
+      
+      // Set the batch items and open the dialog
+      setBatchLoansToReturn(batchItems);
+      
+      // By default, select all items
+      setSelectedBatchItems(batchItems.map(item => 
+        item.individualId || item.loanId
+      ));
+      
+      // Open the batch return dialog
+      setBatchReturnDialogOpen(true);
+      
+    } catch (error) {
+      console.error('Error preparing batch return:', error);
+      setSnackbar({
+        open: true,
+        message: `Error preparing batch return: ${error.message}`,
+        severity: 'error'
+      });
+    } finally {
+      setLoadingBatchLoans(false);
+    }
+  };
+  
+  // Add this function to handle the confirmation of batch returns
+  const handleConfirmBatchReturn = async () => {
+    try {
+      if (selectedBatchItems.length === 0) {
+        setSnackbar({
+          open: true,
+          message: 'Please select at least one book to return',
+          severity: 'warning'
+        });
+        return;
+      }
+      
+      setLoadingBatchLoans(true);
+      console.log('Returning selected batch items:', selectedBatchItems);
+      
+      // Format the data for the API to handle multiple returns
+      const returnData = {
+        loansIds: selectedBatchItems,
+        skipMemberCheck: true // Allow returning without strict member check
+      };
+      
+      console.log('Sending batch return data:', returnData);
+      
+      // Use the returnBooksViaQR API for processing
+      const result = await window.api.returnBooksViaQR(JSON.stringify(returnData));
+      
+      if (result.success) {
+        // Play success sound
+        try {
+          const successAudio = new Audio(
+            "data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA/+M4wAAAAAAAAAAAAEluZm8AAAAPAAAAAwAAAbAAeHh4eHh4eHh4eHh4eHh4eHh4eHh4eHiNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2ysrKysrKysrKysrKysrKysrKysrKysrKy1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1v////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAYJQ//zgwHgAAAOFpOUAAIDTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/84MBlgAADlgAAAABVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/84MBnAAADlIAAAABVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU="
+          );
+          await successAudio.play();
+        } catch (e) {
+          console.log("Audio play prevented by browser");
+        }
+        
+        // Show user-friendly message with count of returned books
+        const returnCount = result.returnedLoans ? result.returnedLoans.length : selectedBatchItems.length;
+        
+        setSnackbar({
+          open: true,
+          message: `Successfully returned ${returnCount} book(s)`,
+          severity: 'success'
+        });
+        
+        // Close dialogs
+        setBatchReturnDialogOpen(false);
+        handleCloseQRScannerDialog();
+        
+        // Refresh the loans list
+        setTimeout(() => {
+          fetchLoansByTab(activeTab);
+        }, 800);
+      } else {
+        throw new Error(result.message || 'Failed to return books');
+      }
+    } catch (error) {
+      console.error('Error processing batch return:', error);
+      
+      // Provide more helpful error messages
+      let errorMessage = error.message || 'Error returning books';
+      
+      if (errorMessage.includes('no active loans found') || errorMessage.includes('No loans found')) {
+        errorMessage = 'No active loans found matching the selected books. They may have already been returned.';
+      } else if (errorMessage.includes('undefined binding')) {
+        errorMessage = 'Database error: Required information is missing. Please try again or use the individual return buttons.';
+      }
+      
+      setSnackbar({
+        open: true,
+        message: `Error: ${errorMessage}`,
+        severity: 'error'
+      });
+    } finally {
+      setLoadingBatchLoans(false);
+    }
+  };
+  
+  // Function to toggle selection of batch items
+  const toggleBatchItemSelection = (itemId) => {
+    setSelectedBatchItems(prev => {
+      if (prev.includes(itemId)) {
+        return prev.filter(id => id !== itemId);
+      } else {
+        return [...prev, itemId];
+      }
+    });
+  };
+  
+  // Modify the handleScannedQRCode function to call handleBatchReturnFromQRCode when appropriate
+  const handleScannedQRCode = async (qrData) => {
+    try {
+      // We've already stopped the scanner in the callback
+      
+      console.log('Processing QR code data:');
+      console.log('----- QR Code Data -----');
+      console.log('Raw data:', qrData);
+      console.log('Type:', typeof qrData);
+      console.log('Length:', qrData ? qrData.length : 0);
+      console.log('First 50 chars:', qrData ? qrData.substring(0, 50) : '');
+      console.log('Data as URI encoded:', encodeURIComponent(qrData));
+      console.log('-----------------------');
+
+      // Display to user that we're processing
+      setScannerResult('Processing QR code...');
+      
+      // First, sanitize the input - remove any whitespace
+      let processedQrCode = qrData ? qrData.trim() : '';
+      
+      // Log the cleaned data
+      console.log('Cleaned QR data:', processedQrCode);
+      
+      // Initialize variables to track what we find
+      let foundLoanIds = false;
+      let memberId = null;
+      let loanIds = [];
+      let transactionId = null;
+      let isBatch = false;
+      
+      // Try to parse as JSON if it looks like JSON
+      if (processedQrCode.startsWith('{') || processedQrCode.startsWith('[')) {
+        try {
+          console.log('Attempting to parse as JSON...');
+          const jsonData = JSON.parse(processedQrCode);
+          console.log('Successfully parsed JSON:', jsonData);
+          
+          // Check if the QR code explicitly indicates it's a batch loan
+          if (jsonData.batch === true) {
+            console.log('QR code explicitly marked as batch loan');
+            isBatch = true;
+          }
+          
+          // Extract member ID if present
+          if (jsonData.m) {
+            memberId = Number(jsonData.m);
+            console.log('Found member ID in QR code:', memberId);
+          } else if (jsonData.memberId) {
+            memberId = Number(jsonData.memberId);
+            console.log('Found memberId in QR code:', memberId);
+          }
+          
+          // Extract transaction ID if present
+          if (jsonData.t) {
+            transactionId = jsonData.t;
+            console.log('Found transaction ID:', transactionId);
+          } else if (jsonData.transactionId) {
+            transactionId = jsonData.transactionId;
+            console.log('Found transaction ID:', transactionId);
+          }
+          
+          // First check for the new simplified format
+          if (jsonData.type === "receipt") {
+            console.log('Found receipt format');
+            
+            // Extract loan IDs from the simplified format
+            if (jsonData.l && Array.isArray(jsonData.l) && jsonData.l.length > 0) {
+              console.log('Using loan IDs from simplified format:', jsonData.l);
+              // Ensure all IDs are valid numbers
+              loanIds = jsonData.l
+                .filter(id => id && !isNaN(Number(id)))
+                .map(id => Number(id));
+                
+              if (loanIds.length > 0) {
+                foundLoanIds = true;
+                console.log('Found valid loan IDs:', loanIds);
+                
+                // If multiple loan IDs are found, this might be a batch
+                if (loanIds.length > 1) {
+                  console.log('Multiple loan IDs detected, treating as potential batch loan');
+                  isBatch = true;
+                }
+              } else {
+                console.warn('No valid loan IDs found in array:', jsonData.l);
+                // Proceed to transaction ID lookup as fallback
+              }
+            } 
+          }
+          // Then check common fields that might contain loan information (old format)
+          else if (jsonData.loansIds) {
+            console.log('Found loansIds field in JSON:', jsonData.loansIds);
+            // Check if the QR code indicates this is a batch loan through another field
+            if (jsonData.is_batch === true || jsonData.isBatch === true) {
+              console.log('JSON data has is_batch or isBatch flag set to true');
+              isBatch = true;
+            }
+            
+            // Ensure the loansIds is an array with valid numbers
+            if (Array.isArray(jsonData.loansIds) && jsonData.loansIds.length > 0) {
+              // Filter to ensure only valid number IDs
+              loanIds = jsonData.loansIds
+                .filter(id => id && !isNaN(Number(id)))
+                .map(id => Number(id));
+                
+              if (loanIds.length > 0) {
+                foundLoanIds = true;
+                console.log('Found valid loan IDs:', loanIds);
+                
+                // If multiple loan IDs are found, this might be a batch
+                if (loanIds.length > 1) {
+                  console.log('Multiple loan IDs detected, treating as potential batch loan');
+                  isBatch = true;
+                }
+              } else {
+                console.warn('loansIds array exists but contains no valid IDs:', jsonData.loansIds);
+              }
+            } else if (typeof jsonData.loansIds === 'number' || /^\d+$/.test(String(jsonData.loansIds))) {
+              // Handle case where loansIds might be a single number instead of array
+              const loanId = Number(jsonData.loansIds);
+              loanIds = [loanId];
+              foundLoanIds = true;
+              console.log('Converted single loansId to array:', loanIds);
+            }
+          } else if (jsonData.loanId) {
+            console.log('Found loanId field, converting to loansIds format');
+            // Ensure it's a valid number
+            if (!isNaN(Number(jsonData.loanId))) {
+              const loanId = Number(jsonData.loanId);
+              loanIds = [loanId];
+              foundLoanIds = true;
+              console.log('Converted loanId to loansIds format:', loanIds);
+            }
+          } else if (jsonData.id && jsonData.type && jsonData.type.includes('loan')) {
+            console.log('Found id field in loan-type JSON');
+            // Ensure it's a valid number
+            if (!isNaN(Number(jsonData.id))) {
+              const loanId = Number(jsonData.id);
+              loanIds = [loanId];
+              foundLoanIds = true;
+              console.log('Converted id to loansIds format:', loanIds);
+            }
+          }
+          
+          // Check if there's total_books > 1 which would indicate a batch
+          if (jsonData.total_books && jsonData.total_books > 1) {
+            console.log(`Found total_books = ${jsonData.total_books}, treating as batch loan`);
+            isBatch = true;
+          }
+        } catch (e) {
+          console.log('JSON parsing failed:', e.message);
+          // Not valid JSON, keep the original data
+        }
+      }
+      
+      // Extract IDs if the QR code contains a numeric value or comma-separated list
+      if (!foundLoanIds && /^[\d,\s]+$/.test(processedQrCode)) {
+        console.log('QR code contains only numbers and commas, parsing as loan IDs');
+        loanIds = processedQrCode.split(',')
+          .map(id => id.trim())
+          .filter(id => id.length > 0 && !isNaN(Number(id)))
+          .map(id => Number(id));
+        
+        if (loanIds.length > 0) {
+          foundLoanIds = true;
+          
+          // If multiple loan IDs are found, this might be a batch
+          if (loanIds.length > 1) {
+            console.log('Multiple comma-separated loan IDs detected, treating as potential batch loan');
+            isBatch = true;
+          }
+        }
+      }
+      
+      // Simple number check for a single loan ID
+      if (!foundLoanIds && /^\d+$/.test(processedQrCode)) {
+        console.log('QR code is a single numeric ID, converting to loansIds format');
+        const loanId = Number(processedQrCode);
+        loanIds = [loanId];
+        foundLoanIds = true;
+        console.log('Converted single numeric ID to loansIds format:', loanIds);
+      }
+      
+      // If empty after processing, show error
+      if (!processedQrCode || processedQrCode.length === 0) {
+        console.error('QR code processing resulted in empty data');
+        setScannerResult('Error: QR code data is empty or invalid');
+        
+        // Re-start scanner
+        setTimeout(() => {
+          if (!qrScannerActive) {
+            startQRScanner();
+          }
+        }, 1500);
+        return;
+      }
+      
+      // If we found loan IDs and it might be a batch OR multiple loan IDs, use the batch return handler
+      if (foundLoanIds && (isBatch || loanIds.length > 1)) {
+        console.log('Using batch return handler for loans:', loanIds, 'isBatch:', isBatch);
+        try {
+          // Even if we only have one loan ID, if it's marked as a batch, use the batch handler
+          await handleBatchReturnFromQRCode(loanIds, memberId);
+          return; // Exit early since batch handler will manage the UI flow
+        } catch (batchError) {
+          console.error('Error in batch return handler:', batchError);
+          setScannerResult(`Error: ${batchError.message}`);
+          
+          // Re-start scanner after error
+          setTimeout(() => {
+            if (!qrScannerActive) {
+              startQRScanner();
+            }
+          }, 3000);
+          return;
+        }
+      }
+      
+      // For single loans, proceed with the normal return process
+      console.log('Final processed QR code data for single loan:', processedQrCode);
+      setScannerResult('Returning books via QR code...');
+      
+      // For single loan returns, need to convert back to JSON if we've extracted IDs
+      if (foundLoanIds && loanIds.length === 1) {
+        const dataWithMember = { 
+          loansIds: loanIds
+        };
+        
+        // Add member ID if available
+        if (memberId) {
+          dataWithMember.memberId = memberId;
+        } else {
+          dataWithMember.skipMemberCheck = true;
+        }
+        
+        // Include transaction ID if available
+        if (transactionId) {
+          dataWithMember.transactionId = transactionId;
+        }
+        
+        processedQrCode = JSON.stringify(dataWithMember);
+      }
+
+      // For single loan returns, use the special window.api.returnBooksViaQR function with the processed data
+      console.log('Sending to returnBooksViaQR API:', processedQrCode);
+      const result = await window.api.returnBooksViaQR(processedQrCode);
+      console.log('API returned result:', result);
+
+      if (result.success) {
+        // Play success sound
+        try {
+          const successAudio = new Audio(
+            "data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA/+M4wAAAAAAAAAAAAEluZm8AAAAPAAAAAwAAAbAAeHh4eHh4eHh4eHh4eHh4eHh4eHh4eHiNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2ysrKysrKysrKysrKysrKysrKysrKysrKy1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1v////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAYJQ//zgwHgAAAOFpOUAAIDTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/84MBlgAADlgAAAABVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/84MBnAAADlIAAAABVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU="
+          );
+          await successAudio.play();
+        } catch (e) {
+          console.log("Audio play prevented by browser");
+        }
+        
+        setScannerResult(result.message || "Books returned successfully!");
+        setSnackbar({
+          open: true,
+          message: result.message || "Books returned successfully!",
+          severity: "success",
+        });
+
+        // Refresh the loans list after a successful return
+        setTimeout(() => {
+          fetchLoansByTab(activeTab);
+          handleCloseQRScannerDialog();
+        }, 2000);
+      } else {
+        // Enhanced error reporting
+        let errorMessage = result.error || result.message || 'Failed to return books';
+        
+        // Try to provide more specific error messages
+        if (errorMessage.toLowerCase().includes('undefined binding')) {
+          errorMessage = `Database query error: Member ID is required but not provided. Please try a different QR code.`;
+        } else if (errorMessage.toLowerCase().includes('no valid loan ids found')) {
+          errorMessage = `No valid loan IDs found in QR code. This QR code doesn't contain loan information or the loans may have already been returned.`;
+        } else if (errorMessage.toLowerCase().includes('no active loans found with ids')) {
+          // Create a more user-friendly message for mismatched loan IDs 
+          const memberIdMatch = errorMessage.match(/Member ID (\d+) has active loans/);
+          const loanIdsMatch = errorMessage.match(/No active loans found with IDs: ([^.]+)/);
+          const activeLoanMatch = errorMessage.match(/Member has different active loans: ([^.]+)/);
+          
+          let qrLoanIds = loanIdsMatch ? loanIdsMatch[1] : "unknown";
+          let actualLoanIds = activeLoanMatch ? activeLoanMatch[1] : "unknown";
+          
+          errorMessage = `This QR code contains loan IDs (${qrLoanIds}) that don't match the current active loans (${actualLoanIds}).
+
+This can happen if:
+1. You're scanning a receipt from a previous borrowing session where books were already returned
+2. The loans have been modified since the receipt was generated
+3. You're scanning a receipt for a different member's loans
+
+Please check the active loans list and use the direct return buttons instead.`;
+        } else if (errorMessage.toLowerCase().includes('invalid')) {
+          errorMessage = `Invalid QR code format. The QR code doesn't contain valid loan information.`;
+        } else if (errorMessage.toLowerCase().includes('not found')) {
+          errorMessage = 'Loan not found. This QR code is not associated with any active loans.';
+        } else if (errorMessage.toLowerCase().includes('already returned')) {
+          errorMessage = 'The books associated with this QR code have already been returned.';
+        }
+        
+        console.error('QR code processing failed:', errorMessage);
+        setScannerResult(`Error: ${errorMessage}`);
+        setSnackbar({
+          open: true,
+          message: errorMessage,
+          severity: "error",
+        });
+        
+        // Re-start scanner if there was an error
+        setTimeout(() => {
+          if (!qrScannerActive) {
+            startQRScanner();
+          }
+        }, 3000);
+      }
+    } catch (error) {
+      console.error("Error processing QR code:", error);
+      
+      // Enhanced error reporting
+      let errorMessage = error.message || 'Failed to process QR code';
+      
+      // Try to provide more user-friendly error messages
+      if (error.message && error.message.includes('Network Error')) {
+        errorMessage = 'Server connection error. Please check your internet connection.';
+      } else if (error.message && error.message.includes('timeout')) {
+        errorMessage = 'Server response timeout. Please try again.';
+      } else if (error.message && error.message.includes('404')) {
+        errorMessage = 'Return service not found. Please contact support.';
+      } else if (error.message && error.message.includes('500')) {
+        errorMessage = 'Server error. Please try again later or contact support.';
+      } else if (error.message && error.message.includes('undefined binding')) {
+        errorMessage = 'Database error: Member ID is required but not provided.';
+      } else if (error.message && error.message.includes('No active loans found with IDs')) {
+        // Detailed explanation for the common mismatch error
+        errorMessage = 'The QR code contains loan IDs that don\'t match the currently active loans. This usually happens when a receipt is from an older borrowing session or the books have already been returned.';
+      }
+      
+      setScannerResult(`Error: ${errorMessage}`);
+      setSnackbar({
+        open: true,
+        message: errorMessage,
+        severity: "error",
+      });
+      
+      // Re-start scanner if there was an error
+      setTimeout(() => {
+        if (!qrScannerActive) {
+          startQRScanner();
+        }
+      }, 3000);
+    }
+  };
+
   const handleManualQRSubmit = () => {
     if (manualQRInput.trim() === "") {
       setScannerResult("Please enter QR code data");
@@ -1009,6 +1685,15 @@ const LoanManagement = () => {
           email: loan.member_email,
         };
 
+        // Extract loan IDs for the batch
+        let loanIds = [];
+        if (loan.loan_ids && Array.isArray(loan.loan_ids)) {
+          loanIds = loan.loan_ids;
+        } else if (loan.id) {
+          // If batch doesn't have separate loan_ids, use the batch loan ID
+          loanIds = [loan.id];
+        }
+
         // Prepare receipt data
         const receiptInfo = {
           transactionId: loan.transaction_id || `LOAN-${Date.now()}-${loan.member_id}`,
@@ -1016,13 +1701,14 @@ const LoanManagement = () => {
           checkoutDate: loan.checkout_date,
           dueDate: loan.due_date,
           books: books,
-          bookCopies: loan.book_copy_ids.map((id, index) => ({
+          bookCopies: loan.book_copy_ids ? loan.book_copy_ids.map((id, index) => ({
             id: id,
-            barcode: loan.book_barcodes[index] || `N/A`,
+            barcode: loan.book_barcodes ? loan.book_barcodes[index] || `N/A` : 'N/A',
             locationCode: "", // Batch loans may not have this detail
-          })),
+          })) : [],
           is_batch: true,
-          total_books: loan.total_books
+          total_books: loan.total_books,
+          loansIds: loanIds // Include the actual loan IDs
         };
 
         setReceiptData(receiptInfo);
@@ -1067,7 +1753,11 @@ const LoanManagement = () => {
             locationCode: loan.book_location_code,
           },
         ],
+        // Critical: Include the actual loan ID for returns
+        loansIds: [loan.id]
       };
+
+      console.log("Receipt data with loan ID:", receiptInfo);
 
       setReceiptData(receiptInfo);
 
@@ -1469,28 +2159,71 @@ const LoanManagement = () => {
         throw new Error("Incomplete receipt data");
       }
 
+      // Make sure we have valid loan IDs - critical for return functionality
+      let validLoanIds = [];
+      
+      // First priority: Check for loansIds directly in the data (explicitly included)
+      if (data.loansIds && Array.isArray(data.loansIds)) {
+        console.log("Processing loansIds from data:", data.loansIds);
+        validLoanIds = data.loansIds
+          .filter(id => id && !isNaN(Number(id)))
+          .map(id => Number(id));
+          
+        console.log("Valid loan IDs extracted:", validLoanIds);
+      }
+      
+      // If no valid loansIds found, check for alternative sources
+      if (validLoanIds.length === 0) {
+        // Check if the loan ID might be on the root level (direct property)
+        if (data.id && !isNaN(Number(data.id))) {
+          console.log("Using loan ID from root data:", data.id);
+          validLoanIds = [Number(data.id)];
+        }
+        // Otherwise check if we have bookCopies data and we're generating from an active loan
+        else if (data.bookCopies && Array.isArray(data.bookCopies) && data.bookCopies.length > 0) {
+          console.log("No loan IDs found, attempting to find loan information from book copies:", data.bookCopies);
+          
+          // IMPORTANT: We should NOT use book_copy_ids as loan IDs
+          // This is not correct and causes errors when trying to return books
+          // Instead, we'll log this as a warning
+          console.warn("Warning: Unable to find valid loan IDs for QR code. Borrowing receipts should include loan IDs.");
+        }
+      }
+
+      // Determine if this is a batch loan
+      const isBatch = (validLoanIds.length > 1) || data.is_batch || (data.total_books && data.total_books > 1);
+      
+      if (isBatch) {
+        console.log("Generating QR code for a batch loan with multiple books");
+      }
+
+      // Create a more streamlined QR data structure with only essential information
+      // This reduces QR code complexity and makes it more scannable
       const qrData = {
-        transactionId: data.transactionId,
-        memberId: data.member.id,
-        memberName: data.member.name,
-        loansIds: data.loansIds || [],
-        checkoutDate: data.checkoutDate,
-        dueDate: data.dueDate,
-        type: "receipt",
+        t: data.transactionId, // Short key name to reduce QR code complexity
+        m: data.member.id,     // Just store the ID, not the entire member object
+        l: validLoanIds,       // Always include loan IDs for returns (may be empty if not found)
+        type: "receipt",       // Keep type for identification
+        batch: isBatch         // Explicitly mark as batch loan when applicable
       };
 
+      // Log the QR data being encoded
       console.log("Generating QR code with data:", qrData);
+      if (validLoanIds.length === 0) {
+        console.warn("WARNING: No valid loan IDs in QR code - returns may not work correctly");
+      }
 
-      // Generate QR code as data URL with CSP workaround
+      // Generate QR code as data URL with enhanced settings for better scanning
       try {
         // First try to use the standard QR code generation
         const qrDataUrl = await QRCode.toDataURL(JSON.stringify(qrData), {
-          width: 200,
-          margin: 2,
-          errorCorrectionLevel: "H", // High error correction level
+          width: 300,          // Increased size for better scanning
+          margin: 4,           // Slightly larger margin for better scanning
+          errorCorrectionLevel: "H", // High error correction level for better scanning reliability
+          scale: 8,            // Higher scale for sharper QR codes
           color: {
-            dark: "#000",
-            light: "#FFF",
+            dark: "#000000",   // Pure black
+            light: "#ffffff",  // Pure white for maximum contrast
           },
         });
 
@@ -1526,17 +2259,24 @@ const LoanManagement = () => {
 
       // Generate a fallback QR code with minimal data
       try {
+        // Extremely simplified data for fallback - just the transaction ID
         const fallbackData = {
-          transactionId: data.transactionId || `RECEIPT-${Date.now()}`,
-          type: "receipt_error",
+          t: data.transactionId || `RECEIPT-${Date.now()}`,
+          m: data.member?.id || 0,
+          type: "receipt"
         };
 
         const fallbackQr = await QRCode.toDataURL(
           JSON.stringify(fallbackData),
           {
-            width: 200,
-            margin: 2,
-            errorCorrectionLevel: "L",
+            width: 300,
+            margin: 4,
+            errorCorrectionLevel: "H", // Still use high correction for fallback
+            scale: 8,
+            color: {
+              dark: "#000000",
+              light: "#ffffff",
+            },
           }
         );
 
@@ -1560,7 +2300,7 @@ const LoanManagement = () => {
           // Show warning but don't block receipt display
           setSnackbar({
             open: true,
-            message: "QR code generated with limited data",
+            message: "QR code generated with minimal data for better scanning",
             severity: "warning",
           });
 
@@ -1575,81 +2315,6 @@ const LoanManagement = () => {
         setQrCodeData("");
         return "";
       }
-    }
-  };
-
-  const handleScannedQRCode = async (qrData) => {
-    stopQRScanner();
-
-    try {
-      setScannerResult("Processing QR code...");
-
-      console.log("QR Data being processed:", qrData);
-
-      // Try to fix common QR code issues before sending to API
-      let processedData = qrData;
-
-      // If it's a simple number (loan ID), convert to expected format
-      if (/^\d+$/.test(processedData)) {
-        processedData = JSON.stringify({ loansIds: [parseInt(processedData)] });
-        console.log("Converted numeric ID to JSON format:", processedData);
-      }
-
-      // If it looks like JSON but isn't parsed yet
-      if (
-        typeof processedData === "string" &&
-        (processedData.startsWith("{") || processedData.startsWith("["))
-      ) {
-        try {
-          // Verify it's valid JSON by parsing and re-stringifying to clean it
-          const jsonObj = JSON.parse(processedData);
-
-          // If it's missing the loansIds field but has other identifiers
-          if (!jsonObj.loansIds && jsonObj.transactionId) {
-            console.log(
-              "Found transaction without loan IDs, adding from receiptData if available"
-            );
-            // Try to use transactionId to identify the loan
-            jsonObj.transactionType = "loan";
-          }
-
-          processedData = JSON.stringify(jsonObj);
-        } catch (e) {
-          console.log("Not valid JSON, using as-is:", e);
-        }
-      }
-
-      const result = await window.api.returnBooksViaQR(processedData);
-
-      if (result.success) {
-        setScannerResult(result.message);
-        setSnackbar({
-          open: true,
-          message: result.message,
-          severity: "success",
-        });
-
-        // Refresh the loans list after a successful return
-        setTimeout(() => {
-          fetchLoansByTab(activeTab);
-          handleCloseQRScannerDialog();
-        }, 2000);
-      } else {
-        setScannerResult(`Error: ${result.message}`);
-        setSnackbar({
-          open: true,
-          message: result.message,
-          severity: "error",
-        });
-      }
-    } catch (error) {
-      console.error("Error processing QR code:", error);
-      setScannerResult("Failed to process QR code");
-      setSnackbar({
-        open: true,
-        message: "Failed to process QR code",
-        severity: "error",
-      });
     }
   };
 
@@ -1681,9 +2346,43 @@ const LoanManagement = () => {
     
     // Also clean up any remaining camera streams
     if (currentStreamRef.current) {
-      currentStreamRef.current.getTracks().forEach(track => track.stop());
-      videoRef.current.srcObject = null;
-      currentStreamRef.current = null;
+      try {
+        currentStreamRef.current.getTracks().forEach(track => {
+          try {
+            track.stop();
+          } catch (e) {
+            console.log("Error stopping track:", e);
+          }
+        });
+        
+        if (videoRef.current) {
+          videoRef.current.srcObject = null;
+        }
+        
+        currentStreamRef.current = null;
+      } catch (e) {
+        console.log("Error cleaning up media stream:", e);
+      }
+    }
+    
+    // Clean up any remaining video elements in the container
+    try {
+      if (qrScannerContainerRef.current) {
+        const videoElements = qrScannerContainerRef.current.querySelectorAll('video');
+        videoElements.forEach(video => {
+          try {
+            if (video.srcObject) {
+              const tracks = video.srcObject.getTracks();
+              tracks.forEach(track => track.stop());
+              video.srcObject = null;
+            }
+          } catch (e) {
+            console.log("Error cleaning up video element:", e);
+          }
+        });
+      }
+    } catch (e) {
+      console.log("Error cleaning up video elements:", e);
     }
   };
 
@@ -1764,32 +2463,78 @@ const LoanManagement = () => {
         }
       };
       
-      // Define scan configuration
+      // Enhanced error handling function for QR code scanning errors
+      const qrCodeErrorCallback = (errorMessage, exception) => {
+        // Most of these errors are just frame-by-frame failures to detect, not actual errors
+        // So we only log real issues
+        if (exception && exception.name !== "NotFoundException") {
+          console.error("QR Scanner error:", errorMessage, exception);
+          
+          // Only show errors that are actual problems, not just "QR code not found in this frame"
+          if (exception.name === "NotReadableError") {
+            setScannerResult("Error: Cannot access camera stream");
+          } else if (exception.name === "NotAllowedError") {
+            setScannerResult("Error: Camera permission denied");
+          }
+        }
+      };
+      
+      // Define enhanced scan configuration with better compatibility settings
       const config = {
-        fps: 10,
+        fps: 10, // Lower FPS can help with performance and detection reliability
         qrbox: { width: 250, height: 250 },
         aspectRatio: 1.0,
         formatsToSupport: [ 
           Html5Qrcode.FORMAT_QR_CODE,
-          Html5Qrcode.FORMAT_DATA_MATRIX
+          Html5Qrcode.FORMAT_DATA_MATRIX,
+          Html5Qrcode.FORMAT_CODE_128, // Barcode formats for wider compatibility
+          Html5Qrcode.FORMAT_CODE_39,
+          Html5Qrcode.FORMAT_UPC_A,
+          Html5Qrcode.FORMAT_EAN_13
         ],
         rememberLastUsedCamera: true,
-        showTorchButtonIfSupported: true
+        showTorchButtonIfSupported: true,
+        videoConstraints: {
+          // Add enhanced camera constraints for better performance
+          width: { ideal: 1280, min: 640 },
+          height: { ideal: 720, min: 480 },
+          // Improved low-light setting
+          advanced: [{ 
+            zoom: 1.0,
+            brightness: { ideal: 0.5 },
+            contrast: { ideal: 0.5 },
+            whiteBalanceMode: "continuous",
+            focusMode: "continuous" 
+          }]
+        }
       };
       
-      // Start scanner with camera
-      const cameraId = selectedCamera === "environment" ? 
-        { facingMode: "environment" } : 
-        selectedCamera;
+      console.log("Preparing to start camera with selected mode:", selectedCamera);
+      
+      // Enhanced camera selection strategy
+      let cameraId;
+      if (selectedCamera === "environment") {
+        console.log("Using environment-facing camera preference");
+        cameraId = { facingMode: { exact: "environment" } };
+      } else if (selectedCamera === "user") {
+        console.log("Using user-facing camera preference");
+        cameraId = { facingMode: { exact: "user" } };
+      } else if (selectedCamera) {
+        console.log("Using specific camera ID:", selectedCamera);
+        cameraId = selectedCamera;
+      } else {
+        console.log("No camera preference set, using first available camera");
+        // If no preference, try to use environment-facing camera first (more useful for QR scanning)
+        cameraId = { facingMode: "environment" };
+      }
+      
+      console.log("Starting scanner with camera ID:", cameraId, "and config:", config);
       
       await html5QrCode.start(
         cameraId, 
         config,
         qrCodeSuccessCallback,
-        (errorMessage) => {
-          // This is a deliberate callback for errors but doesn't indicate a problem
-          // It's used for logs - when no QR is found in a frame
-        }
+        qrCodeErrorCallback
       );
       
       setScannerResult("Camera active! Position the QR code in the scanning area.");
@@ -1816,6 +2561,17 @@ const LoanManagement = () => {
         errorMessage = "Camera not found. Please try another camera or use manual entry.";
       } else if (error.toString().includes("NotReadableError")) {
         errorMessage = "Camera is already in use by another application. Please close other camera apps.";
+      } else if (error.toString().includes("OverconstrainedError")) {
+        errorMessage = "The selected camera cannot be used. Please select another camera.";
+        
+        // Try fallback to any available camera
+        if (selectedCamera !== "") {
+          setSelectedCamera("");
+          setTimeout(() => {
+            console.log("Attempting to use any available camera instead...");
+            startQRScanner();
+          }, 500);
+        }
       }
       
       setScannerResult(`Error: ${errorMessage}`);
@@ -1824,6 +2580,9 @@ const LoanManagement = () => {
         message: errorMessage,
         severity: "error",
       });
+      
+      // Show the direct input form as a fallback
+      setShowDirectLoanInput(true);
     }
   };
 
@@ -2109,6 +2868,205 @@ const LoanManagement = () => {
     setQrPopoverAnchor(null);
   };
 
+  // Add a function to handle batch returns directly from the loans list
+  const handleOpenBatchReturnDialog = async (loan) => {
+    try {
+      setLoadingBatchLoans(true);
+      console.log("Preparing batch return for loan:", loan);
+      
+      if (!loan || (!loan.id && !loan.member_id)) {
+        throw new Error("Invalid loan data");
+      }
+      
+      let loanId = loan.id;
+      let memberId = loan.member_id;
+      
+      // If loan is not a batch loan but we're using the batch return feature,
+      // we'll need to check if it's part of a batch
+      let loanDetails;
+      
+      try {
+        console.log(`Fetching details for loan ID ${loanId}`);
+        loanDetails = await window.api.getLoanDetails(loanId);
+        console.log("Loan details:", loanDetails);
+      } catch (error) {
+        console.error(`Error fetching loan details for ${loanId}:`, error);
+        // Continue anyway - we'll try to get member loans instead
+      }
+      
+      // If the loan is a batch loan, handle it directly
+      if (loanDetails && loanDetails.is_batch) {
+        console.log(`Loan ${loanId} is a batch loan with ${loanDetails.total_books} books`);
+        
+        // Process the batch loan details to build the batch return UI
+        const batchItems = [];
+        
+        // If we have individual loan IDs and their statuses, use them to filter
+        const individualLoans = [];
+        
+        // Try to find all individual loans first (if available)
+        if (loanDetails.loan_ids && loanDetails.loan_ids.length > 0) {
+          // For each individual loan ID, try to get details to check if it's been returned
+          for (let i = 0; i < loanDetails.loan_ids.length; i++) {
+            try {
+              const individualId = loanDetails.loan_ids[i];
+              if (!individualId) continue;
+              
+              // Try to get the loan status if possible
+              let individualStatus = 'Unknown';
+              try {
+                const individualDetails = await window.api.getLoanDetails(individualId);
+                individualStatus = individualDetails ? individualDetails.status : 'Unknown';
+                
+                // Only include the loan if it hasn't been returned
+                if (individualStatus !== 'Returned') {
+                  individualLoans.push({
+                    id: individualId,
+                    index: i,
+                    status: individualStatus,
+                    details: individualDetails
+                  });
+                } else {
+                  console.log(`Skipping loan ${individualId} as it has status: ${individualStatus}`);
+                }
+              } catch (e) {
+                console.log(`Couldn't fetch status for loan ${individualId}, will check main batch status:`, e);
+                // If we can't determine individual status, include it (we'll filter by the batch status later)
+                individualLoans.push({
+                  id: individualId,
+                  index: i,
+                  status: loanDetails.status || 'Unknown'
+                });
+              }
+            } catch (error) {
+              console.error(`Error processing individual loan at index ${i}:`, error);
+            }
+          }
+        }
+        
+        console.log(`Found ${individualLoans.length} potential active individual loans within the batch`);
+        
+        if (individualLoans.length > 0) {
+          // Process only the active individual loans
+          for (const individualLoan of individualLoans) {
+            const i = individualLoan.index;
+            
+            // Only include loans that are not returned
+            if (individualLoan.status !== 'Returned') {
+              batchItems.push({
+                loanId: loanDetails.id,
+                individualId: individualLoan.id,
+                bookCopyId: loanDetails.book_copy_ids ? loanDetails.book_copy_ids[i] : null,
+                title: loanDetails.book_titles[i],
+                barcode: loanDetails.book_barcodes ? loanDetails.book_barcodes[i] : 'N/A',
+                author: loanDetails.book_authors ? loanDetails.book_authors[i] : (loanDetails.book_author || ''),
+                cover: loanDetails.book_covers ? loanDetails.book_covers[i] : (loanDetails.book_cover || null),
+                coverColor: loanDetails.book_colors ? loanDetails.book_colors[i] : (loanDetails.book_color || null),
+                isbn: loanDetails.book_isbns ? loanDetails.book_isbns[i] : (loanDetails.book_isbn || ''),
+                status: individualLoan.status
+              });
+            }
+          }
+        } else {
+          // Fallback: if we don't have individual statuses, use the main batch status
+          // but only if the main batch status is not 'Returned'
+          if (loanDetails.status !== 'Returned' && loanDetails.book_titles && Array.isArray(loanDetails.book_titles)) {
+            console.log('No individual loan statuses found, using batch status:', loanDetails.status);
+            
+            for (let i = 0; i < loanDetails.book_titles.length; i++) {
+              // For books in a batch, use individual loan IDs if available
+              const individualId = loanDetails.loan_ids && loanDetails.loan_ids[i] 
+                ? loanDetails.loan_ids[i] 
+                : null;
+              
+              batchItems.push({
+                loanId: loanDetails.id,
+                individualId: individualId,
+                bookCopyId: loanDetails.book_copy_ids ? loanDetails.book_copy_ids[i] : null,
+                title: loanDetails.book_titles[i],
+                barcode: loanDetails.book_barcodes ? loanDetails.book_barcodes[i] : 'N/A',
+                author: loanDetails.book_authors ? loanDetails.book_authors[i] : (loanDetails.book_author || ''),
+                cover: loanDetails.book_covers ? loanDetails.book_covers[i] : (loanDetails.book_cover || null),
+                coverColor: loanDetails.book_colors ? loanDetails.book_colors[i] : (loanDetails.book_color || null),
+                isbn: loanDetails.book_isbns ? loanDetails.book_isbns[i] : (loanDetails.book_isbn || ''),
+                status: loanDetails.status
+              });
+            }
+          }
+        }
+        
+        if (batchItems.length === 0) {
+          throw new Error('No available books to return in this batch loan. All books in this batch may have already been returned.');
+        }
+        
+        console.log('Prepared batch items for return:', batchItems);
+        
+        // Set the batch items and open the dialog
+        setBatchLoansToReturn(batchItems);
+        
+        // By default, select all items
+        setSelectedBatchItems(batchItems.map(item => 
+          item.individualId || item.loanId
+        ));
+        
+        // Open the batch return dialog
+        setBatchReturnDialogOpen(true);
+      } 
+      // If not a batch loan or couldn't fetch loan details, try to get all member loans
+      else if (memberId) {
+        console.log(`Getting all loans for member ${memberId}`);
+        try {
+          const memberLoans = await window.api.getLoansByMember(memberId);
+          console.log(`Found ${memberLoans.length} loans for member ${memberId}`);
+          
+          // Filter to only include active loans from the same transaction
+          let relevantLoans = [];
+          
+          // If we have a transaction ID, use it to find related loans
+          if (loan.transaction_id) {
+            relevantLoans = memberLoans.filter(l => 
+              l.status !== 'Returned' && 
+              l.transaction_id === loan.transaction_id
+            );
+            console.log(`Found ${relevantLoans.length} active loans with transaction ID ${loan.transaction_id}`);
+          } 
+          // Otherwise, just use the original loan if it's active
+          else if (loan.status !== 'Returned') {
+            relevantLoans = [loan];
+          }
+          // If the original loan was returned, look for other active loans for this member
+          else {
+            relevantLoans = memberLoans.filter(l => l.status !== 'Returned');
+            console.log(`Found ${relevantLoans.length} active loans for member ${memberId}`);
+          }
+          
+          if (relevantLoans.length === 0) {
+            throw new Error('No active loans found for this member. All books may have already been returned.');
+          }
+          
+          // Handle multiple loans using the batch return handler
+          const loanIds = relevantLoans.map(l => l.id);
+          console.log(`Forwarding to batch handler with loan IDs: ${loanIds.join(', ')}`);
+          await handleBatchReturnFromQRCode(loanIds, memberId);
+        } catch (memberError) {
+          console.error(`Error getting member loans:`, memberError);
+          throw new Error(`Could not find active loans: ${memberError.message}`);
+        }
+      } else {
+        throw new Error('Could not find enough information to process this loan.');
+      }
+    } catch (error) {
+      console.error("Error preparing batch return:", error);
+      setSnackbar({
+        open: true,
+        message: `Error: ${error.message}`,
+        severity: "error"
+      });
+    } finally {
+      setLoadingBatchLoans(false);
+    }
+  };
+
   if (loading) {
     return (
       <Box sx={{ display: "flex", justifyContent: "center", mt: 10 }}>
@@ -2380,6 +3338,22 @@ const LoanManagement = () => {
                             }}
                           >
                             <AssignmentReturnedIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      )}
+                      
+                      {/* Add batch return option for batch loans */}
+                      {loan.status !== "Returned" && loan.is_batch && (
+                        <Tooltip title="Batch Return (select books)">
+                          <IconButton
+                            size="small"
+                            color="secondary"
+                            onClick={() => {
+                              console.log("Opening batch return for loan:", loan);
+                              handleOpenBatchReturnDialog(loan);
+                            }}
+                          >
+                            <LibraryBooksIcon fontSize="small" />
                           </IconButton>
                         </Tooltip>
                       )}
@@ -3434,34 +4408,44 @@ const LoanManagement = () => {
                 </Grid>
                 <Grid item xs={12} md={4}>
                   <Box className="qr-section">
-                    <Box
-                      sx={{
-                        display: "flex",
-                        flexDirection: "column",
-                        alignItems: "center",
-                      }}
-                    >
                       {qrCodeData && (
+                        <Box sx={{ textAlign: "center" }}>
                         <Box
                           component="img"
                           src={qrCodeData}
                           alt="Loan QR Code"
                           sx={{
-                            width: 120,
-                            height: 120,
-                            border: "1px solid #eee",
+                              width: 200,
+                              height: 200,
+                              border: "2px solid #1976d2", // Blue border for emphasis
                             borderRadius: 1,
-                            p: 1,
-                          }}
-                        />
-                      )}
+                              p: 2,
+                              boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
+                              mx: "auto", // Center horizontally
+                              mb: 1
+                            }}
+                          />
+                          <Typography
+                            variant="body2"
+                            sx={{ 
+                              mt: 1, 
+                              fontWeight: "medium",
+                              color: "primary.main"
+                            }}
+                          >
+                            Scan to Return Books
+                          </Typography>
                       <Typography
                         variant="caption"
-                        sx={{ mt: 1, fontStyle: "italic" }}
+                            sx={{ 
+                              display: "block",
+                              color: "text.secondary" 
+                            }}
                       >
-                        Scan for quick return
+                            Use the QR Scanner in Loan Management
                       </Typography>
                     </Box>
+                      )}
                   </Box>
                 </Grid>
               </Grid>
@@ -3930,6 +4914,229 @@ const LoanManagement = () => {
         onSuccess={handleMultiReturnSuccess}
         currentUser={selectedMemberForReturn}
       />
+
+      {/* Batch Return Dialog */}
+      <Dialog
+        open={batchReturnDialogOpen}
+        onClose={() => setBatchReturnDialogOpen(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>
+          <Typography variant="h6">Select Books to Return</Typography>
+        </DialogTitle>
+        <DialogContent>
+          {loadingBatchLoans ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
+              <CircularProgress />
+            </Box>
+          ) : (
+            <>
+              <Box sx={{ mb: 2 }}>
+                <Typography variant="body1" gutterBottom>
+                  Please select the books you want to return from this batch:
+                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                  Only books that have not been returned are shown below.
+                </Typography>
+              </Box>
+              
+              <TableContainer component={Paper} variant="outlined">
+                <Table>
+                  <TableHead sx={{ bgcolor: 'primary.light' }}>
+                    <TableRow>
+                      <TableCell padding="checkbox">
+                        <Checkbox
+                          indeterminate={
+                            selectedBatchItems.length > 0 && 
+                            selectedBatchItems.length < batchLoansToReturn.length
+                          }
+                          checked={
+                            batchLoansToReturn.length > 0 && 
+                            selectedBatchItems.length === batchLoansToReturn.length
+                          }
+                          onChange={e => {
+                            if (e.target.checked) {
+                              // Select all
+                              setSelectedBatchItems(
+                                batchLoansToReturn.map(item => item.individualId || item.loanId)
+                              );
+                            } else {
+                              // Deselect all
+                              setSelectedBatchItems([]);
+                            }
+                          }}
+                        />
+                      </TableCell>
+                      <TableCell>Book</TableCell>
+                      <TableCell>Details</TableCell>
+                      <TableCell>Loan ID</TableCell>
+                      <TableCell>Status</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {batchLoansToReturn.map((item) => {
+                      // Use individual ID if available, otherwise use loan ID
+                      const itemId = item.individualId || item.loanId;
+                      const isSelected = selectedBatchItems.includes(itemId);
+                      
+                      return (
+                        <TableRow 
+                          key={`${item.loanId}-${item.title}-${itemId}`}
+                          hover
+                          onClick={() => toggleBatchItemSelection(itemId)}
+                          selected={isSelected}
+                          sx={{ 
+                            cursor: 'pointer',
+                            '&.Mui-selected': {
+                              backgroundColor: 'rgba(25, 118, 210, 0.08)',
+                            }
+                          }}
+                        >
+                          <TableCell padding="checkbox">
+                            <Checkbox 
+                              checked={isSelected}
+                              onClick={e => {
+                                e.stopPropagation();
+                                toggleBatchItemSelection(itemId);
+                              }}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                              {item.cover ? (
+                                <Box
+                                  component="img"
+                                  src={item.cover}
+                                  alt={`Cover for ${item.title}`}
+                                  sx={{
+                                    width: 40,
+                                    height: 60,
+                                    objectFit: "cover",
+                                    borderRadius: 1,
+                                    mr: 2,
+                                  }}
+                                />
+                              ) : (
+                                <Box
+                                  sx={{
+                                    width: 40,
+                                    height: 60,
+                                    bgcolor: item.coverColor || "#6B4226",
+                                    borderRadius: 1,
+                                    display: "flex",
+                                    justifyContent: "center",
+                                    alignItems: "center",
+                                    color: "#fff",
+                                    fontSize: "8px",
+                                    textAlign: "center",
+                                    lineHeight: 1,
+                                    p: 0.5,
+                                    mr: 2,
+                                  }}
+                                >
+                                  {item.title}
+                                </Box>
+                              )}
+                              <Box>
+                                <Typography variant="body1" sx={{ fontWeight: 'medium' }}>
+                                  {item.title}
+                                </Typography>
+                                {item.author && (
+                                  <Typography variant="body2" color="text.secondary">
+                                    by {item.author}
+                                  </Typography>
+                                )}
+                              </Box>
+                            </Box>
+                          </TableCell>
+                          <TableCell>
+                            <Typography variant="body2">
+                              Barcode: {item.barcode || 'N/A'}
+                            </Typography>
+                            {item.bookCopyId && (
+                              <Typography variant="body2" color="text.secondary">
+                                Copy ID: {item.bookCopyId}
+                              </Typography>
+                            )}
+                            {item.isbn && (
+                              <Typography variant="caption" color="text.secondary" display="block">
+                                ISBN: {item.isbn}
+                              </Typography>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            {item.individualId ? (
+                              <Chip 
+                                label={`ID: ${item.individualId}`} 
+                                color="primary" 
+                                variant="outlined" 
+                                size="small" 
+                              />
+                            ) : (
+                              <Chip 
+                                label={`Batch: ${item.loanId}`} 
+                                color="secondary" 
+                                variant="outlined" 
+                                size="small" 
+                              />
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <Chip
+                              label={item.status || "Checked Out"}
+                              color={
+                                item.status === "Overdue" 
+                                  ? "error" 
+                                  : item.status === "Returned" 
+                                    ? "success" 
+                                    : "primary"
+                              }
+                              size="small"
+                            />
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                    {batchLoansToReturn.length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={5} align="center" sx={{ py: 3 }}>
+                          <Typography color="text.secondary">
+                            No books found in this batch loan
+                          </Typography>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+              
+              <Box sx={{ mt: 3, p: 2, bgcolor: 'info.light', borderRadius: 1 }}>
+                <Typography variant="body2" color="info.contrastText">
+                  <strong>Selected:</strong> {selectedBatchItems.length} of {batchLoansToReturn.length} books
+                </Typography>
+              </Box>
+            </>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button 
+            onClick={() => setBatchReturnDialogOpen(false)} 
+            color="inherit"
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={handleConfirmBatchReturn}
+            variant="contained"
+            color="primary"
+            startIcon={<AssignmentReturnedIcon />}
+            disabled={selectedBatchItems.length === 0 || loadingBatchLoans}
+          >
+            Return Selected Books
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };

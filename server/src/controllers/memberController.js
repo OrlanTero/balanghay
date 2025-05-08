@@ -543,14 +543,14 @@ const getMemberStatistics = asyncHandler(async (req, res) => {
       .whereNull('return_date')
       .count('id as count')
       .first();
-    const activeLoansCount = activeLoansResult ? activeLoansResult.count : 0;
+    const activeLoansCount = activeLoansResult ? parseInt(activeLoansResult.count, 10) : 0;
     
     // Get total loans count
     const totalLoansResult = await db('loans')
       .where({ member_id: id })
       .count('id as count')
       .first();
-    const totalLoansCount = totalLoansResult ? totalLoansResult.count : 0;
+    const totalLoansCount = totalLoansResult ? parseInt(totalLoansResult.count, 10) : 0;
     
     // Get overdue loans count
     const overdueLoansResult = await db('loans')
@@ -562,7 +562,21 @@ const getMemberStatistics = asyncHandler(async (req, res) => {
       .where('due_date', '<', new Date())
       .count('id as count')
       .first();
-    const overdueLoansCount = overdueLoansResult ? overdueLoansResult.count : 0;
+    const overdueLoansCount = overdueLoansResult ? parseInt(overdueLoansResult.count, 10) : 0;
+    
+    // Get returned loans count
+    const returnedLoansResult = await db('loans')
+      .where({ 
+        member_id: id,
+        status: 'Returned'
+      })
+      .orWhere(function() {
+        this.where({ member_id: id })
+            .whereNotNull('return_date');
+      })
+      .count('id as count')
+      .first();
+    const returnedLoansCount = returnedLoansResult ? parseInt(returnedLoansResult.count, 10) : 0;
     
     // Get total fine amount
     const totalFinesResult = await db('loans')
@@ -570,7 +584,7 @@ const getMemberStatistics = asyncHandler(async (req, res) => {
       .whereNotNull('fine_amount')
       .sum('fine_amount as total')
       .first();
-    const totalFines = totalFinesResult && totalFinesResult.total ? totalFinesResult.total : 0;
+    const totalFines = totalFinesResult && totalFinesResult.total ? parseFloat(totalFinesResult.total) : 0;
     
     // Get unpaid fine amount
     const unpaidFinesResult = await db('loans')
@@ -581,7 +595,7 @@ const getMemberStatistics = asyncHandler(async (req, res) => {
       .whereNotNull('fine_amount')
       .sum('fine_amount as total')
       .first();
-    const unpaidFines = unpaidFinesResult && unpaidFinesResult.total ? unpaidFinesResult.total : 0;
+    const unpaidFines = unpaidFinesResult && unpaidFinesResult.total ? parseFloat(unpaidFinesResult.total) : 0;
     
     // Get member since date from the memberExists object we already retrieved
     const memberSince = memberExists.created_at;
@@ -591,6 +605,7 @@ const getMemberStatistics = asyncHandler(async (req, res) => {
       activeLoans: activeLoansCount,
       totalLoans: totalLoansCount,
       overdueLoans: overdueLoansCount,
+      returnedLoans: returnedLoansCount,
       totalFines,
       unpaidFines,
       memberSince

@@ -98,7 +98,7 @@ const migrateDatabase = async (db) => {
         table.string("location").notNullable();
         table.string("section").nullable();
         table.text("description").nullable();
-        table.string("code").nullable(); // Adding a code field for shelf identification
+        table.string("code").notNullable(); // Making code field required to match current schema
         table.integer("capacity").defaultTo(100);
         table.timestamp("created_at").defaultTo(db.fn.now());
         table.timestamp("updated_at").defaultTo(db.fn.now());

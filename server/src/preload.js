@@ -461,6 +461,21 @@ contextBridge.exposeInMainWorld("api", {
   addUser: (user) => ipcRenderer.invoke("users:add", user),
   updateUser: (id, user) => ipcRenderer.invoke("users:update", { id, user }),
   deleteUser: (id) => ipcRenderer.invoke("users:delete", id),
+
+  // Add this function to fetch loan details
+  getLoanDetails: async (loanId) => {
+    try {
+      const result = await ipcRenderer.invoke('loans:getLoanDetails', loanId);
+      if (result.success) {
+        return result.data;
+      } else {
+        throw new Error(result.error || 'Unknown error fetching loan details');
+      }
+    } catch (error) {
+      console.error('Error in getLoanDetails API:', error.message);
+      throw error;
+    }
+  },
 });
 
 // Expose Node.js process versions

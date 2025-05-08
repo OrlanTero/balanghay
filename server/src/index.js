@@ -1,9 +1,24 @@
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu, shell, protocol, session } = require("electron");
 const path = require("node:path");
 const SettingsStore = require("./settings-store");
 const { createApiServer, IP_ADDRESS, PORT } = require("./api-server");
 const fs = require("fs");
 const db = require('./database/db');
+const { 
+  getAllLoans: controllerGetAllLoans, 
+  getActiveLoans: controllerGetActiveLoans, 
+  getOverdueLoans: controllerGetOverdueLoans, 
+  getLoansByMember: controllerGetLoansByMember, 
+  updateLoan: controllerUpdateLoan, 
+  returnBook, 
+  getReturnableBooks, 
+  markLoanAsLost, 
+  addLoanNote,
+  borrowBooks: controllerBorrowBooks 
+} = require("./controllers/loanController");
+
+// Explicitly destructure the functions we need from the database
+const { borrowBooks } = require('./database/db');
 
 // Add error handling for protocol registration which can cause the errors you're seeing
 app.setAsDefaultProtocolClient = () => {
@@ -66,8 +81,6 @@ const {
   getOverdueLoans,
   addLoan,
   updateLoan,
-  returnBook,
-  borrowBooks,
   returnBooks,
   returnBooksViaQRCode,
   resetDatabase,
@@ -93,6 +106,7 @@ const {
   getPopularCategories,
   getMonthlyCheckouts,
   getDatabasePath,
+  getLoanDetails,
 } = require("./database/db");
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
@@ -936,13 +950,86 @@ function setupIpcHandlers() {
   });
 
   ipcMain.handle("loans:borrowBooks", async (event, memberData) => {
-    const result = await borrowBooks(memberData);
-    return result;
+    try {
+      console.log("Loan borrowing request received:", JSON.stringify(memberData, null, 2));
+      
+      // Validate essential data
+      if (!memberData) {
+        throw new Error("No member data provided for borrowing books");
+      }
+      
+      // First try to use the controller function for better validation and error handling
+      try {
+        const result = await controllerBorrowBooks(memberData);
+        console.log(`Successfully borrowed ${result.length} book(s)`);
+        return result;
+      } catch (controllerError) {
+        console.error("Error calling controller borrowBooks:", controllerError.message);
+        
+        // Fall back to direct DB call for backward compatibility, but with better validation
+        console.log("Falling back to direct DB call");
+        
+        // Check essential parameters
+        if (!memberData.member_id) {
+          throw new Error("No member ID provided in loan request");
+        }
+        
+        // Check if book copies are provided in some form
+        const hasBookCopies = memberData.book_copies || memberData.book_copy_id;
+        if (!hasBookCopies) {
+          throw new Error("No book copies provided for borrowing");
+        }
+        
+        const result = await borrowBooks(memberData);
+        return result;
+      }
+    } catch (error) {
+      console.error("Error in loans:borrowBooks handler:", error.message);
+      throw error;
+    }
   });
 
-  ipcMain.handle("loans:returnBooks", async (event, loanIds) => {
-    const result = await returnBooks(loanIds);
-    return result;
+  ipcMain.handle("loans:returnBooks", async (event, returnData) => {
+    try {
+      console.log("Return books request received:", JSON.stringify(returnData, null, 2));
+      
+      let loanIds = [];
+      
+      // Check if returnData has the new format with returns array
+      if (returnData && returnData.returns && Array.isArray(returnData.returns)) {
+        console.log("Processing returnData with returns array format");
+        
+        // Extract loan_id from each return object
+        loanIds = returnData.returns
+          .filter(item => item && (item.loan_id || item.loanId)) // Support both loan_id and loanId formats
+          .map(item => item.loan_id || item.loanId);
+          
+        console.log(`Extracted ${loanIds.length} loan IDs for return:`, loanIds);
+      } 
+      // If it's already an array of IDs (legacy format)
+      else if (Array.isArray(returnData)) {
+        console.log("Processing returnData as direct array of IDs (legacy format)");
+        loanIds = returnData;
+      }
+      // If it's a single loan ID
+      else if (typeof returnData === 'number' || (typeof returnData === 'string' && !isNaN(Number(returnData)))) {
+        console.log("Processing returnData as single loan ID");
+        loanIds = [Number(returnData)];
+      }
+      
+      if (loanIds.length === 0) {
+        throw new Error("No valid loan IDs provided for return");
+      }
+      
+      const result = await returnBooks(loanIds);
+      return result;
+    } catch (error) {
+      console.error("Error in loans:returnBooks handler:", error);
+      return {
+        success: false,
+        message: `Failed to return books: ${error.message}`
+      };
+    }
   });
 
   ipcMain.handle("loans:returnBooksViaQRCode", async (event, qrData) => {
@@ -973,8 +1060,51 @@ function setupIpcHandlers() {
     return await addShelf(shelf);
   });
 
-  ipcMain.handle("shelves:update", async (event, { id, shelf }) => {
-    return await updateShelf(id, shelf);
+  ipcMain.handle("shelves:update", async (event, params) => {
+    try {
+      console.log("Shelves update request received:", JSON.stringify(params));
+      
+      // Validate we have parameters
+      if (!params) {
+        throw new Error("No parameters provided for shelf update");
+      }
+      
+      // Handle both formats: {id, shelf} and {id: {id: actualId, shelf: actualShelf}}
+      let id, shelf;
+      
+      if (params.id && typeof params.id === 'object' && params.id.id && params.id.shelf) {
+        // Handle nested format: {id: {id: actualId, shelf: actualShelf}}
+        id = params.id.id;
+        shelf = params.id.shelf;
+        console.log("Extracted from nested format - id:", id, "shelf:", JSON.stringify(shelf));
+      } else {
+        // Regular format: {id, shelf}
+        id = params.id;
+        shelf = params.shelf;
+        console.log("Using standard format - id:", id, "shelf:", JSON.stringify(shelf));
+      }
+      
+      // Validate extracted data
+      if (!id) {
+        throw new Error("No shelf ID provided for update");
+      }
+      
+      if (!shelf) {
+        throw new Error("No shelf data provided for update");
+      }
+      
+      // Ensure shelf_code is processed properly
+      if (shelf.shelf_code !== undefined) {
+        const code = shelf.shelf_code;
+        console.log(`Found shelf_code value: ${code}`);
+      }
+      
+      // Call the update function
+      return await updateShelf(id, shelf);
+    } catch (error) {
+      console.error("Error in shelves:update handler:", error);
+      throw error;
+    }
   });
 
   ipcMain.handle("shelves:delete", async (event, id) => {
@@ -1081,6 +1211,17 @@ function setupIpcHandlers() {
     
     // If all else fails, return a direct path to resources folder so the fallback handler works
     return `file://${process.resourcesPath}/assets/${resourceName}`;
+  });
+
+  // Add the ipcMain handler for getLoanDetails
+  ipcMain.handle('loans:getLoanDetails', async (event, loanId) => {
+    try {
+      const loanDetails = await getLoanDetails(loanId);
+      return { success: true, data: loanDetails };
+    } catch (error) {
+      console.error(`Error in loans:getLoanDetails: ${error.message}`);
+      return { success: false, error: error.message };
+    }
   });
 }
 

@@ -10,8 +10,17 @@ const { withTransaction } = require('../config/db-utils');
  * Get all shelves
  * @returns {Promise<Array>} - Array of shelf objects
  */
-const getAllShelves = () => {
-  return db('shelves').select('*');
+const getAllShelves = async () => {
+  const shelves = await db('shelves').select('*');
+  
+  // Map code to shelf_code for consistency
+  return shelves.map(shelf => {
+    if (shelf.code !== undefined) {
+      shelf.shelf_code = shelf.code;
+      // Keep code for backward compatibility
+    }
+    return shelf;
+  });
 };
 
 /**
@@ -68,16 +77,22 @@ const getAllShelvesWithCounts = async () => {
  * @param {number} id - The ID of the shelf to retrieve
  * @returns {Promise<Object>} - The shelf object
  */
-const getShelfById = (id) => {
-  return db('shelves')
+const getShelfById = async (id) => {
+  const shelf = await db('shelves')
     .where({ id })
-    .first()
-    .then(shelf => {
-      if (!shelf) {
-        throw new Error(`Shelf with ID ${id} not found`);
-      }
-      return shelf;
-    });
+    .first();
+    
+  if (!shelf) {
+    throw new Error(`Shelf with ID ${id} not found`);
+  }
+  
+  // Map code to shelf_code for consistency
+  if (shelf.code !== undefined) {
+    shelf.shelf_code = shelf.code;
+    // Keep code for backward compatibility
+  }
+  
+  return shelf;
 };
 
 /**

@@ -76,9 +76,26 @@ const Dashboard = () => {
         
         // Try to fetch stats (but continue if it fails)
         try {
+          console.log('Fetching stats for member:', member.id);
           const statsResponse = await getMemberStats(member.id);
+          console.log('Stats response:', statsResponse);
+          
           if (statsResponse && statsResponse.stats) {
-            setStats(statsResponse.stats);
+            // Ensure all stats values are numbers
+            const parsedStats = {
+              totalLoans: parseInt(statsResponse.stats.totalLoans || 0, 10),
+              activeLoans: parseInt(statsResponse.stats.activeLoans || 0, 10),
+              overdueLoans: parseInt(statsResponse.stats.overdueLoans || 0, 10),
+              returnedLoans: parseInt(statsResponse.stats.returnedLoans || 0, 10) ||
+                             parseInt(statsResponse.stats.totalLoans || 0, 10) - 
+                             parseInt(statsResponse.stats.activeLoans || 0, 10),
+              totalFines: parseFloat(statsResponse.stats.totalFines || 0),
+              unpaidFines: parseFloat(statsResponse.stats.unpaidFines || 0),
+              memberSince: statsResponse.stats.memberSince
+            };
+            
+            console.log('Parsed stats:', parsedStats);
+            setStats(parsedStats);
           }
         } catch (statsErr) {
           console.error('Error fetching stats:', statsErr);
@@ -147,7 +164,19 @@ const Dashboard = () => {
         getMemberStats(member.id)
           .then(response => {
             if (response && response.stats) {
-              setStats(response.stats);
+              // Ensure all stats values are numbers
+              const parsedStats = {
+                totalLoans: parseInt(response.stats.totalLoans || 0, 10),
+                activeLoans: parseInt(response.stats.activeLoans || 0, 10),
+                overdueLoans: parseInt(response.stats.overdueLoans || 0, 10),
+                returnedLoans: parseInt(response.stats.returnedLoans || 0, 10) ||
+                               parseInt(response.stats.totalLoans || 0, 10) - 
+                               parseInt(response.stats.activeLoans || 0, 10),
+                totalFines: parseFloat(response.stats.totalFines || 0),
+                unpaidFines: parseFloat(response.stats.unpaidFines || 0),
+                memberSince: response.stats.memberSince
+              };
+              setStats(parsedStats);
             }
           })
       ])
@@ -277,7 +306,7 @@ const Dashboard = () => {
                     <Grid item xs={6} sm={3}>
                       <Box sx={{ textAlign: 'center', p: 1 }}>
                         <Typography variant="h4" color="primary">
-                          {stats?.totalLoans || 0}
+                          {typeof stats.totalLoans === 'number' ? stats.totalLoans : 0}
                         </Typography>
                         <Typography variant="body2" color="text.secondary">
                           Total Loans
@@ -287,7 +316,7 @@ const Dashboard = () => {
                     <Grid item xs={6} sm={3}>
                       <Box sx={{ textAlign: 'center', p: 1 }}>
                         <Typography variant="h4" color="info.main">
-                          {stats?.activeLoans || 0}
+                          {typeof stats.activeLoans === 'number' ? stats.activeLoans : 0}
                         </Typography>
                         <Typography variant="body2" color="text.secondary">
                           Active Loans
@@ -297,7 +326,9 @@ const Dashboard = () => {
                     <Grid item xs={6} sm={3}>
                       <Box sx={{ textAlign: 'center', p: 1 }}>
                         <Typography variant="h4" color="success.main">
-                          {stats?.returnedLoans || stats?.totalLoans - stats?.activeLoans || 0}
+                          {typeof stats.returnedLoans === 'number' ? stats.returnedLoans : 
+                            (typeof stats.totalLoans === 'number' && typeof stats.activeLoans === 'number') ? 
+                              stats.totalLoans - stats.activeLoans : 0}
                         </Typography>
                         <Typography variant="body2" color="text.secondary">
                           Returned Books
@@ -307,7 +338,7 @@ const Dashboard = () => {
                     <Grid item xs={6} sm={3}>
                       <Box sx={{ textAlign: 'center', p: 1 }}>
                         <Typography variant="h4" color="error.main">
-                          {stats?.overdueLoans || 0}
+                          {typeof stats.overdueLoans === 'number' ? stats.overdueLoans : 0}
                         </Typography>
                         <Typography variant="body2" color="text.secondary">
                           Overdue Items

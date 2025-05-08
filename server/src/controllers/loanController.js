@@ -485,6 +485,90 @@ const getReturnableBooks = asyncHandler(async (req, res) => {
   }
 });
 
+const borrowBooks = async (data) => {
+  try {
+    console.log("Loan controller - borrowBooks called with data:", JSON.stringify(data, null, 2));
+    
+    // Validate essential data
+    if (!data) {
+      throw new Error("No data provided for borrowing books");
+    }
+    
+    // Check if member_id is provided
+    if (!data.member_id) {
+      throw new Error("Member ID is required for borrowing books");
+    }
+    
+    // Normalize the book_copies parameter to ensure it's an array
+    let bookCopies = [];
+    
+    if (data.book_copies) {
+      // Handle different formats of book_copies
+      if (Array.isArray(data.book_copies)) {
+        bookCopies = data.book_copies.map(id => id.toString());
+      } else if (typeof data.book_copies === 'string') {
+        // It could be a comma-separated list or a single value
+        bookCopies = data.book_copies.includes(',') 
+          ? data.book_copies.split(',').map(id => id.trim()) 
+          : [data.book_copies];
+      } else {
+        // Handle case where it might be a number or other type
+        bookCopies = [data.book_copies.toString()];
+      }
+    } else if (data.book_copy_id) {
+      // Handle book_copy_id similarly
+      if (Array.isArray(data.book_copy_id)) {
+        bookCopies = data.book_copy_id.map(id => id.toString());
+      } else if (typeof data.book_copy_id === 'string') {
+        bookCopies = data.book_copy_id.includes(',') 
+          ? data.book_copy_id.split(',').map(id => id.trim()) 
+          : [data.book_copy_id];
+      } else {
+        bookCopies = [data.book_copy_id.toString()];
+      }
+    }
+    
+    // Check if we have any book copies to borrow
+    if (bookCopies.length === 0) {
+      throw new Error("No book copies provided for borrowing");
+    }
+    
+    console.log(`Processing loan for member ID ${data.member_id} with ${bookCopies.length} book(s):`, 
+      bookCopies.join(", "));
+    
+    // Format dates if provided, or use defaults
+    const checkoutDate = data.checkout_date ? new Date(data.checkout_date) : new Date();
+    
+    // Set due date to 14 days from checkout if not provided
+    let dueDate;
+    if (data.due_date) {
+      dueDate = new Date(data.due_date);
+    } else {
+      dueDate = new Date(checkoutDate);
+      dueDate.setDate(dueDate.getDate() + 14); // Default to 14 days
+    }
+    
+    // Prepare final data for the borrowBooks function
+    const memberData = {
+      member_id: data.member_id,
+      book_copies: bookCopies,
+      checkout_date: checkoutDate,
+      due_date: dueDate
+    };
+    
+    console.log("Calling database borrowBooks with:", JSON.stringify(memberData, null, 2));
+    
+    const result = await db.borrowBooks(memberData);
+    
+    console.log(`Successfully borrowed ${result.length} books for member ${data.member_id}`);
+    
+    return result;
+  } catch (error) {
+    console.error("Error in loan controller - borrowBooks:", error.message);
+    throw error;
+  }
+};
+
 module.exports = {
   getAllLoans,
   getLoanById,
@@ -500,5 +584,6 @@ module.exports = {
   getMemberLoanHistory,
   getReturnableBooks,
   markLoanAsLost,
-  addLoanNote
+  addLoanNote,
+  borrowBooks
 }; 
